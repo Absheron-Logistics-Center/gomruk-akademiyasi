@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react';
-import { ChevronLeft, LogOut, Minus, Plus, UserRound } from 'lucide-react';
+import { ChevronLeft, LogOut, Minus, Plus, UserRound, PanelLeftOpen } from 'lucide-react';
 
 const MONTHS = ['yanvar', 'fevral', 'mart', 'aprel', 'may', 'iyun', 'iyul', 'avqust', 'sentyabr', 'oktyabr', 'noyabr', 'dekabr'];
 const fmtTime = d => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 const fmtDate = d => `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 
-export default function Topbar({ user, logout, font, setFont, back, backLabel, crumb }) {
+export default function Topbar({ user, logout, font, setFont, back, backLabel, crumb, onMenu }) {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 15000); return () => clearInterval(t); }, []);
   return (
     <div className="topbar">
       <div className="top-left">
+        {onMenu && <button className="icon-btn ws-menu-btn" onClick={onMenu} aria-label="Dərslərin siyahısı"><PanelLeftOpen size={18} /></button>}
         {back && (
           <button className="pill-chip back-chip" onClick={back}>
             <ChevronLeft size={16} /><span>{backLabel || 'Geri'}</span>

@@ -3,6 +3,7 @@ import {
   FileText, BookOpen, ListChecks, Plus, Replace, Trash2, Pencil, Download, Loader2, ChevronLeft, ChevronRight, FileQuestion
 } from 'lucide-react';
 import Topbar from './Topbar.jsx';
+import Workspace from './Workspace.jsx';
 import Reader from './Reader.jsx';
 import TestPanel from './TestPanel.jsx';
 import AddDialog from './AddDialog.jsx';
@@ -107,8 +108,8 @@ export default function LessonPage(props) {
 
   return (
     <>
-      <Topbar {...props} back={back} backLabel="Dərslər" crumb={`Dərs ${index + 1}`} />
-      <div className="page-wrap">
+      <Workspace {...props} active={{ type: 'lesson', id: lesson.id, tab: current }} crumb={`Dərs ${index + 1}`}>
+      <div className="ws-page">
         <header className="lesson-head">
           <span className="lesson-no">{index + 1}</span>
           <div className="lesson-title">
@@ -201,6 +202,7 @@ export default function LessonPage(props) {
           </section>
         )}
       </div>
+      </Workspace>
 
       {dialog && <AddDialog kind="section" edit={dialog} catalog={catalog} onClose={() => setDialog(null)}
         onDone={async () => { setDialog(null); await reload(); }} />}

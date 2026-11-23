@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { GraduationCap, Plus, Replace, Trash2, Pencil, Timer, Download, Loader2, FileQuestion, ChevronLeft, ChevronRight } from 'lucide-react';
 import Topbar from './Topbar.jsx';
+import Workspace from './Workspace.jsx';
 import TestPanel from './TestPanel.jsx';
 import AddDialog from './AddDialog.jsx';
 import { Missing } from './LessonPage.jsx';
@@ -63,8 +64,8 @@ export default function ExamPage(props) {
 
   return (
     <>
-      <Topbar {...props} back={back} backLabel="Dərslər" crumb="Yekun sınaqlar" />
-      <div className="page-wrap">
+      <Workspace {...props} active={{ type: 'exam', id: exam.id }} crumb="Yekun sınaqlar">
+      <div className="ws-page">
         <header className="lesson-head">
           <span className="lesson-no exam"><GraduationCap size={20} /></span>
           <div className="lesson-title">
@@ -100,6 +101,7 @@ export default function ExamPage(props) {
           )}
         </section>
       </div>
+      </Workspace>
       {dialog && <AddDialog kind="section" edit={{ owner: exam.id, ownerTitle: exam.title, section: 'tests', replace: exam.tests, isExam: true }} catalog={catalog}
         onClose={() => setDialog(false)} onDone={async () => { setDialog(false); await reload(); }} />}
     </>
