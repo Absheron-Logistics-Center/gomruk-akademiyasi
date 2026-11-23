@@ -1,9 +1,8 @@
-// Workspace.jsx — the layout of an open lesson or exam: the list of lessons
-// moves to the left side, the open lesson fills the right side (like V1.5).
-// On a phone the list opens from the menu button in the top bar.
-import { useEffect, useMemo, useState } from 'react';
-import { Search, Plus, FolderUp, Pencil, Trash2, ChevronRight, FileText, BookOpen, ListChecks, X, Home as HomeIcon } from 'lucide-react';
-import Topbar from './Topbar.jsx';
+// Workspace.jsx — the frame of every page: the brand and the lesson list on
+// the left, a slim top bar (where you are, Orijinal / İzah / Test, account)
+// and the page itself on the right. On a phone the list opens from the menu button.
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Search, Plus, FolderUp, Pencil, Trash2, X, Menu, LogOut, ChevronLeft, ChevronRight, BookOpen } from 'lucide-react';
 import AddDialog from './AddDialog.jsx';
 import FolderImport from './FolderImport.jsx';
 import { useUi } from './ui.jsx';
@@ -12,29 +11,44 @@ import { go } from '../lib/nav.js';
 import { dropSession } from '../lib/tests.js';
 
 const lower = s => String(s || '').toLocaleLowerCase('az');
-const SUBS = [
-  { tab: 'original', label: 'Orijinal normativ sənəd', icon: FileText, count: l => (l.originals || []).length },
-  { tab: 'izah', label: 'İzahlı tədris materialı', icon: BookOpen, count: l => (l.explanation ? 1 : 0) },
-  { tab: 'test', label: 'Test paketi', icon: ListChecks, count: l => l.tests?.count || 0 }
+export const SUBS = [
+  { tab: 'original', label: 'Orijinal', count: l => (l.originals || []).length },
+  { tab: 'izah', label: 'İzah', count: l => (l.explanation ? 1 : 0) },
+  { tab: 'test', label: 'Test', count: l => l.tests?.count || 0 }
 ];
+const initials = (name) => String(name || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toLocaleUpperCase('az') || '?';
 
-// active: { type: 'lesson'|'exam', id, tab }
-export default function Workspace({ active, title, subtitle, tools, children, ...props }) {
-  const { catalog, reload, user } = props;
+// active: { type: 'home'|'lesson'|'exam', id, tab }
+// kicker / title: where you are; seg: the switch in the top bar;
+// nav: { prev, next } links; fill: the page fills the screen (the document viewer)
+export default function Workspace({ active, kicker, title, seg, nav, fill, children, ...props }) {
+  const { catalog, reload, user, logout } = props;
   const { toast, confirm, prompt } = useUi();
   const [query, setQuery] = useState('');
-  const [open, setOpen] = useState(() => new Set(active?.type === 'lesson' ? [active.id] : []));
   const [drawer, setDrawer] = useState(false);
   const [adding, setAdding] = useState(false);
   const [folderOpen, setFolderOpen] = useState(false);
   const [drag, setDrag] = useState(null);
   const [order, setOrder] = useState(null);
+  const [menu, setMenu] = useState(false);
+  const listRef = useRef(null);
 
-  // the open lesson is always unfolded; the phone drawer closes after a choice
+  useEffect(() => { setDrawer(false); }, [active?.type, active?.id, active?.tab]);
+
+  // keep the open lesson in sight in the list
   useEffect(() => {
-    if (active?.type === 'lesson') setOpen(s => (s.has(active.id) ? s : new Set([...s, active.id])));
-    setDrawer(false);
-  }, [active?.type, active?.id, active?.tab]);
+    const box = listRef.current, row = box?.querySelector('.nav-row.on');
+    if (!box || !row) return;
+    const r = row.getBoundingClientRect(), b = box.getBoundingClientRect();
+    if (r.top < b.top || r.bottom > b.bottom) box.scrollTop += r.top - b.top - b.height / 3;
+  }, [active?.id, catalog]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const off = (e) => { if (!e.target.closest?.('.acct')) setMenu(false); };
+    document.addEventListener('pointerdown', off);
+    return () => document.removeEventListener('pointerdown', off);
+  }, [menu]);
 
   const lessons = useMemo(() => {
     const all = (catalog?.lessons || []).map((l, i) => ({ ...l, number: i + 1 }));
@@ -47,13 +61,12 @@ export default function Workspace({ active, title, subtitle, tools, children, ..
     if (!q) return lessons;
     return lessons.filter(l => [l.title, `dərs ${l.number}`, String(l.number), ...(l.originals || []).map(d => d.name)].some(x => lower(x).includes(q)));
   }, [lessons, query]);
-
-  const toggle = (id) => setOpen(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const exams = catalog?.exams || [];
 
   async function rename(l) {
-    const title = await prompt({ title: 'Dərsin adını dəyiş', label: 'Dərsin adı', value: l.title });
-    if (!title || title === l.title) return;
-    try { await api.renameLesson(l.id, title); await reload(); toast('Dərsin adı dəyişdirildi.'); }
+    const t = await prompt({ title: 'Dərsin adını dəyiş', label: 'Dərsin adı', value: l.title });
+    if (!t || t === l.title) return;
+    try { await api.renameLesson(l.id, t); await reload(); toast('Dərsin adı dəyişdirildi.'); }
     catch (e) { toast(e.message, 'error'); }
   }
   async function remove(l) {
@@ -73,19 +86,16 @@ export default function Workspace({ active, title, subtitle, tools, children, ..
       }
     } catch (e) { toast(e.message, 'error'); }
   }
-
-  /* final exams: add, rename, delete */
   async function addExam() {
-    const n = (catalog?.exams || []).length + 1;
-    const title = await prompt({ title: 'Yeni yekun sınaq', label: 'Sınağın adı', value: `Yekun sınaq ${n}`, confirmLabel: 'Əlavə et' });
-    if (!title) return;
-    try { const ex = await api.addExam(title); await reload(); toast(`"${title}" əlavə edildi.`); go(`/sinaq/${ex.id}`); }
+    const t = await prompt({ title: 'Yeni yekun sınaq', label: 'Sınağın adı', value: `Yekun sınaq ${exams.length + 1}`, confirmLabel: 'Əlavə et' });
+    if (!t) return;
+    try { const ex = await api.addExam(t); await reload(); toast(`"${t}" əlavə edildi.`); go(`/sinaq/${ex.id}`); }
     catch (e) { toast(e.message, 'error'); }
   }
   async function renameExam(ex) {
-    const title = await prompt({ title: 'Sınağın adını dəyiş', label: 'Ad', value: ex.title });
-    if (!title || title === ex.title) return;
-    try { await api.saveExam(ex.id, { title }); await reload(); toast('Ad dəyişdirildi.'); }
+    const t = await prompt({ title: 'Sınağın adını dəyiş', label: 'Ad', value: ex.title });
+    if (!t || t === ex.title) return;
+    try { await api.saveExam(ex.id, { title: t }); await reload(); toast('Ad dəyişdirildi.'); }
     catch (e) { toast(e.message, 'error'); }
   }
   async function removeExam(ex) {
@@ -103,7 +113,7 @@ export default function Workspace({ active, title, subtitle, tools, children, ..
     } catch (e) { toast(e.message, 'error'); }
   }
 
-  /* drag to reorder (same as on the main page) */
+  /* drag a lesson to a new place */
   function onDragStart(e, id) {
     if (query.trim()) { e.preventDefault(); toast('Sıranı dəyişmək üçün əvvəlcə axtarışı təmizləyin.'); return; }
     setDrag({ id, over: null, after: false });
@@ -130,102 +140,123 @@ export default function Workspace({ active, title, subtitle, tools, children, ..
   }
 
   return (
-    <>
-      <Topbar {...props} onMenu={() => setDrawer(true)}
-        title={title} subtitle={subtitle} tools={tools} />
-      <div className="workspace">
-        {drawer && <div className="ws-scrim" onClick={() => setDrawer(false)} />}
-        <aside className={`ws-side ${drawer ? 'show' : ''}`} aria-label="Dərslər">
-          <div className="ws-side-top">
-            <button className="ws-home" onClick={() => go('/')}><HomeIcon size={15} />Əsas səhifə</button>
-            <button className="ws-close" onClick={() => setDrawer(false)} aria-label="Bağla"><X size={16} /></button>
-          </div>
-          <div className="ws-search">
+    <div className="shell">
+      <button className="brand" onClick={() => go('/')} title="Birinci dərs">
+        <span className="brand-mark"><BookOpen size={16} strokeWidth={2.2} /></span>
+        <span>Gömrük Akademiyası</span>
+      </button>
+
+      <header className="bar">
+        <button className="bar-menu" onClick={() => setDrawer(true)} aria-label="Dərslərin siyahısı"><Menu size={19} /></button>
+        <div className="bar-where">
+          {kicker && <span className="bar-kicker">{kicker}</span>}
+          <h1 title={title}>{title}</h1>
+          {nav && (
+            <span className="bar-nav">
+              <button disabled={!nav.prev} onClick={() => nav.prev && go(nav.prev)} title="Əvvəlki"><ChevronLeft size={16} /></button>
+              <button disabled={!nav.next} onClick={() => nav.next && go(nav.next)} title="Növbəti"><ChevronRight size={16} /></button>
+            </span>
+          )}
+        </div>
+        {seg && <div className="bar-seg">{seg}</div>}
+        <div className="acct">
+          <button className="avatar" onClick={() => setMenu(m => !m)} title={user?.name} aria-expanded={menu}>{initials(user?.name)}</button>
+          {menu && (
+            <div className="acct-menu">
+              <div className="acct-name"><span className="avatar sm">{initials(user?.name)}</span><span>{user?.name}</span></div>
+              <button onClick={() => { setMenu(false); logout(); }}><LogOut size={15} />Çıxış</button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {drawer && <div className="side-scrim" onClick={() => setDrawer(false)} />}
+      <aside className={`side ${drawer ? 'show' : ''}`} aria-label="Dərslər">
+        <div className="side-head">
+          <span className="side-brand"><span className="brand-mark"><BookOpen size={15} strokeWidth={2.2} /></span>Gömrük Akademiyası</span>
+          <button className="side-close" onClick={() => setDrawer(false)} aria-label="Bağla"><X size={17} /></button>
+        </div>
+        <div className="side-tools">
+          <label className="side-search">
             <Search size={15} />
             <input value={query} placeholder="Dərs axtar" onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setQuery(''); }} />
             {query && <button onClick={() => setQuery('')} aria-label="Təmizlə"><X size={13} /></button>}
-          </div>
-          <div className="ws-actions">
-            <button className="ws-add" onClick={() => setAdding(true)}><Plus size={15} />Dərs əlavə et</button>
-            <button className="ws-folder" onClick={() => setFolderOpen(true)} title="Qovluqdan yüklə"><FolderUp size={15} /></button>
+          </label>
+          <button className="side-btn" onClick={() => setFolderOpen(true)} title="Qovluqdan yüklə"><FolderUp size={16} /></button>
+          <button className="side-btn primary" onClick={() => setAdding(true)} title="Dərs əlavə et"><Plus size={17} /></button>
+        </div>
+
+        <div className="side-scroll" ref={listRef}>
+          <div className="nav-group"><span>Dərslər</span><em>{lessons.length}</em></div>
+          <div onDragOver={e => drag && e.preventDefault()} onDrop={onDrop}>
+            {visible.map(l => {
+              const on = active?.type === 'lesson' && active.id === l.id;
+              const mark = drag?.over === l.id && drag.id !== l.id ? (drag.after ? 'drop-after' : 'drop-before') : '';
+              return (
+                <div key={l.id} className={`nav-item ${drag?.id === l.id ? 'dragging' : ''} ${mark}`}
+                  draggable onDragStart={e => onDragStart(e, l.id)} onDragOver={e => onDragOver(e, l.id)} onDragEnd={() => setDrag(null)}>
+                  <div className={`nav-row ${on ? 'on' : ''}`}>
+                    <button className="nav-open" onClick={() => go(`/ders/${l.id}`)} title={l.title}>
+                      <span className="nav-num">{l.number}</span>
+                      <span className="nav-name">{l.title}</span>
+                    </button>
+                    <span className="nav-tools">
+                      <button title="Adını dəyiş" onClick={() => rename(l)}><Pencil size={13} /></button>
+                      <button className="danger" title={`Dərs ${l.number}-i sil`} onClick={() => remove(l)}><Trash2 size={13} /></button>
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+            {!visible.length && <div className="nav-none">{query ? 'Axtarışa uyğun dərs yoxdur.' : 'Hələ dərs yoxdur.'}</div>}
           </div>
 
-          <div className="ws-scroll">
-            <div className="ws-section"><span>Dərslər</span><em>{lessons.length}</em></div>
-            <div className="ws-list" onDragOver={e => drag && e.preventDefault()} onDrop={onDrop}>
-              {visible.map(l => {
-                const isActive = active?.type === 'lesson' && active.id === l.id;
-                const unfolded = open.has(l.id) || !!query.trim();
-                const mark = drag?.over === l.id && drag.id !== l.id ? (drag.after ? 'drop-after' : 'drop-before') : '';
-                return (
-                  <div key={l.id} className={`ws-lesson ${isActive ? 'active' : ''} ${drag?.id === l.id ? 'dragging' : ''} ${mark}`}
-                    draggable onDragStart={e => onDragStart(e, l.id)} onDragOver={e => onDragOver(e, l.id)} onDragEnd={() => setDrag(null)}>
-                    <div className="ws-row">
-                      <button className="ws-open" onClick={() => go(`/ders/${l.id}`)} title={l.title}>
-                        <span className="ws-num">{l.number}</span>
-                        <span className="ws-name">{l.title}</span>
-                      </button>
-                      <span className="ws-tools">
-                        <button title="Adını dəyiş" onClick={() => rename(l)}><Pencil size={13} /></button>
-                        <button className="danger" title={`Dərs ${l.number}-i sil`} onClick={() => remove(l)}><Trash2 size={13} /></button>
-                        {!isActive && (
-                          <button className={`ws-chev ${unfolded ? 'open' : ''}`} onClick={() => toggle(l.id)} aria-expanded={unfolded} title="Bölmələr">
-                            <ChevronRight size={14} />
-                          </button>
-                        )}
-                      </span>
-                    </div>
-                    {unfolded && (
-                      <div className="ws-subs">
-                        {SUBS.map(s => {
-                          const n = s.count(l);
-                          const on = isActive && (active.tab || 'original') === s.tab;
-                          return (
-                            <button key={s.tab} className={`ws-sub ${on ? 'on' : ''} ${n ? '' : 'empty'}`} onClick={() => go(`/ders/${l.id}/${s.tab}`)}>
-                              <span>{s.label}</span><em>{n || ''}</em>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {!visible.length && <div className="ws-none">{query ? 'Axtarışa uyğun dərs yoxdur.' : 'Hələ dərs yoxdur.'}</div>}
-            </div>
-
-            <div className="ws-section"><span>Yekun sınaqlar</span><em>{(catalog?.exams || []).filter(e => e.tests).length} / {(catalog?.exams || []).length}</em>
-              <button className="ws-section-add" onClick={addExam} title="Yeni yekun sınaq"><Plus size={14} /></button>
-            </div>
-            <div className="ws-list">
-              {(catalog?.exams || []).map((ex, i) => {
-                const on = active?.type === 'exam' && active.id === ex.id;
-                return (
-                  <div key={ex.id} className={`ws-lesson ws-exam-item ${on ? 'active' : ''} ${ex.tests ? '' : 'empty'}`}>
-                    <div className="ws-row">
-                      <button className="ws-open" onClick={() => go(`/sinaq/${ex.id}`)} title={ex.title}>
-                        <span className="ws-num">{i + 1}</span>
-                        <span className="ws-name">{ex.title}</span>
-                        <em className="ws-meta">{ex.tests ? `${ex.tests.count} sual` : ''}</em>
-                      </button>
-                      <span className="ws-tools">
-                        <button title="Adını dəyiş" onClick={() => renameExam(ex)}><Pencil size={13} /></button>
-                        <button className="danger" title="Sınağı sil" onClick={() => removeExam(ex)}><Trash2 size={13} /></button>
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-              {!(catalog?.exams || []).length && <button className="ws-none ws-add-exam" onClick={addExam}>Yekun sınaq əlavə et</button>}
-            </div>
+          <div className="nav-group"><span>Yekun sınaqlar</span><em>{exams.length}</em>
+            <button onClick={addExam} title="Yeni yekun sınaq"><Plus size={14} /></button>
           </div>
-        </aside>
-        <main className="ws-main">{children}</main>
-      </div>
+          {exams.map((ex, i) => {
+            const on = active?.type === 'exam' && active.id === ex.id;
+            return (
+              <div key={ex.id} className="nav-item">
+                <div className={`nav-row ${on ? 'on' : ''} ${ex.tests ? '' : 'muted'}`}>
+                  <button className="nav-open" onClick={() => go(`/sinaq/${ex.id}`)} title={ex.title}>
+                    <span className="nav-num">{i + 1}</span>
+                    <span className="nav-name">{ex.title}</span>
+                    {ex.tests && <em className="nav-meta">{ex.tests.count}</em>}
+                  </button>
+                  <span className="nav-tools">
+                    <button title="Adını dəyiş" onClick={() => renameExam(ex)}><Pencil size={13} /></button>
+                    <button className="danger" title="Sınağı sil" onClick={() => removeExam(ex)}><Trash2 size={13} /></button>
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+          {!exams.length && <button className="nav-none link" onClick={addExam}>Yekun sınaq əlavə et</button>}
+        </div>
+      </aside>
+
+      <main className={`main ${fill ? 'fill' : ''}`}>
+        {seg && <div className="seg-row">{seg}</div>}
+        {children}
+      </main>
 
       {adding && <AddDialog kind="lesson" catalog={catalog} onClose={() => setAdding(false)}
         onDone={async (res) => { setAdding(false); await reload(); if (res?.go) go(res.go); }} />}
       {folderOpen && <FolderImport catalog={catalog} onClose={() => setFolderOpen(false)} onDone={async () => { await reload(); }} />}
-    </>
+    </div>
+  );
+}
+
+// the Orijinal / İzah / Test switch
+export function Seg({ items, value, onChange }) {
+  return (
+    <div className="sw" role="tablist">
+      {items.map(it => (
+        <button key={it.key} role="tab" aria-selected={value === it.key} className={value === it.key ? 'on' : ''} onClick={() => onChange(it.key)}>
+          {it.label}{it.count !== undefined && <span className="sw-n">{it.count}</span>}
+        </button>
+      ))}
+    </div>
   );
 }

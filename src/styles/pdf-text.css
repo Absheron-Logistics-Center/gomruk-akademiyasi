@@ -10,3 +10,6 @@
 .textLayer span.ga-hl { background: rgba(250, 204, 21, 0.45); border-radius: 2px; }
 .textLayer span.ga-hl.cur { background: rgba(245, 158, 11, 0.75); }
 .hiddenCanvasElement { position: absolute; top: 0; left: 0; width: 0; height: 0; display: none; }
+.textLayer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.textLayer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.textLayer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }

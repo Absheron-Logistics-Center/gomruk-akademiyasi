@@ -1,12 +1,14 @@
-// Reader.jsx — opens a stored document in the browser's own PDF viewer.
-// A Word file is shown as its PDF copy (made automatically in the background);
-// until that copy exists it is shown as a readable page with search, pages and zoom.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// Reader.jsx — the document viewer. PDFs (and Word files once their PDF copy
+// exists) open in the site's own viewer: page thumbnails, page jump, zoom,
+// fit to width or page, rotate, search, print, download and full screen.
+// A Word file without its PDF copy yet is shown as a readable page meanwhile.
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize2, Download, ExternalLink, Search, MoveHorizontal,
-  Loader2, AlertTriangle, ChevronUp, ChevronDown, X, RotateCw, FileDown
+  ChevronUp, ChevronDown, ZoomIn, ZoomOut, Maximize2, Minimize2, Download, ExternalLink, Search, MoveHorizontal,
+  Loader2, AlertTriangle, X, RotateCw, FileDown, PanelLeft, Printer, FileText, MoreHorizontal, Check
 } from 'lucide-react';
 import { Progress } from './ui.jsx';
+import Drop from './Drop.jsx';
 import '../styles/pdf-text.css';
 import { loadDoc, saveBlob, isPdf, fmtSize } from '../lib/files.js';
 import { GACompat } from '../lib/gaParse.js';
@@ -17,12 +19,17 @@ const READER_CSS = `
   mark.ga-hit.cur{background:#f59e0b;color:#fff;box-shadow:0 0 0 2px rgba(245,158,11,.35)}
   body{transition:none}
 `;
+const ZOOMS = [50, 75, 100, 125, 150, 200, 300];
+const readPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === '1'; } catch { return d; } };
+const writePref = (k, v) => { try { localStorage.setItem(k, v ? '1' : '0'); } catch { /* private mode */ } };
 
-export default function Reader({ doc, label, extra }) {
+// fileSlot: the file name or file picker; actions: replace / delete / add buttons
+export default function Reader({ doc, label, fileSlot, actions }) {
   const [blob, setBlob] = useState(null);
   const [err, setErr] = useState('');
   const [progress, setProgress] = useState(0);
   const [attempt, setAttempt] = useState(0);
+  const [full, setFull] = useState(false);
   const panel = useRef(null);
 
   // a Word file with a PDF copy opens as the PDF
@@ -39,35 +46,60 @@ export default function Reader({ doc, label, extra }) {
   // a Word file without a PDF copy yet: make one in the background
   useEffect(() => { if (!isPdf(doc.name) && !doc.pdf) queuePdf(doc); }, [doc.id, doc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const pdf = isPdf(doc.name) || variant === 'pdf';
-  const fullscreen = () => {
-    const el = panel.current;
-    if (!el) return;
+  useEffect(() => {
+    const on = () => setFull(document.fullscreenElement === panel.current);
+    document.addEventListener('fullscreenchange', on);
+    return () => document.removeEventListener('fullscreenchange', on);
+  }, []);
+  const toggleFull = () => {
     if (document.fullscreenElement) document.exitFullscreen?.();
-    else el.requestFullscreen?.();
+    else panel.current?.requestFullscreen?.();
   };
 
+  const pdf = isPdf(doc.name) || variant === 'pdf';
+  const bar = { fileSlot, actions, full, onFull: toggleFull };
+
   return (
-    <div className="reader" ref={panel}>
+    <div className="viewer" ref={panel}>
       {err ? (
-        <div className="reader-state bad">
-          <AlertTriangle size={22} />
-          <strong>Sənəd açılmadı</strong>
-          <span>{err}</span>
-          <button className="btn small" onClick={() => setAttempt(a => a + 1)}><RotateCw size={14} />Yenidən cəhd et</button>
-        </div>
+        <>
+          <Bar {...bar} />
+          <div className="viewer-state bad">
+            <AlertTriangle size={22} />
+            <strong>Sənəd açılmadı</strong>
+            <span>{err}</span>
+            <button className="btn small" onClick={() => setAttempt(a => a + 1)}><RotateCw size={14} />Yenidən cəhd et</button>
+          </div>
+        </>
       ) : !blob ? (
-        <div className="reader-state">
-          <Loader2 size={22} className="spin" />
-          <strong>{label} yüklənir</strong>
-          <span>{doc.name} · {fmtSize(variant ? doc.pdf.size : doc.size)}</span>
-          <div className="reader-progress"><Progress value={progress} /></div>
-        </div>
+        <>
+          <Bar {...bar} />
+          <div className="viewer-state">
+            <Loader2 size={22} className="spin" />
+            <strong>{label} yüklənir</strong>
+            <span>{doc.name} · {fmtSize(variant ? doc.pdf.size : doc.size)}</span>
+            <div className="viewer-progress"><Progress value={progress} /></div>
+          </div>
+        </>
       ) : pdf ? (
-        <PdfView blob={blob} doc={doc} onFull={fullscreen} extra={extra} fromWord={!!variant} />
+        <PdfView blob={blob} doc={doc} fromWord={!!variant} bar={bar} />
       ) : (
-        <WordView blob={blob} doc={doc} onFull={fullscreen} extra={extra} />
+        <WordView blob={blob} doc={doc} bar={bar} />
       )}
+    </div>
+  );
+}
+
+// the toolbar frame: the file on the left, the tools, then the actions
+function Bar({ fileSlot, actions, children, after }) {
+  return (
+    <div className="vbar">
+      {children?.[0]}
+      {fileSlot && <div className="vbar-file">{fileSlot}</div>}
+      {children?.slice?.(1)}
+      <span className="vbar-grow" />
+      {after}
+      {actions && <><span className="vsep" /><div className="vbar-actions">{actions}</div></>}
     </div>
   );
 }
@@ -82,9 +114,20 @@ function useObjectUrl(blob, type) {
   return url;
 }
 
+// print a PDF without showing the browser's PDF viewer: load it in a hidden frame and print that
+function printPdf(url) {
+  const f = document.createElement('iframe');
+  f.style.cssText = 'position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0;pointer-events:none';
+  f.src = url;
+  f.onload = () => setTimeout(() => {
+    try { f.contentWindow.focus(); f.contentWindow.print(); }
+    catch { window.open(url, '_blank', 'noopener'); }
+  }, 250);
+  document.body.appendChild(f);
+  setTimeout(() => f.remove(), 120000);
+}
+
 /* ------------------------------ PDF ------------------------------ */
-// The site's own PDF viewer (pdf.js): pages drawn as pictures with a text
-// layer on top, so text can be selected and searched. Loaded only when a PDF opens.
 let pdfjsP = null;
 function pdfjs() {
   if (!pdfjsP) {
@@ -97,19 +140,23 @@ function pdfjs() {
 }
 const lowerAz = (t) => String(t || '').toLocaleLowerCase('az');
 
-function PdfView({ blob, doc, onFull, extra, fromWord }) {
+function PdfView({ blob, doc, fromWord, bar }) {
   const pdfName = fromWord ? `${doc.name.replace(/\.[^.]+$/, '')}.pdf` : doc.name;
   const url = useObjectUrl(blob, 'application/pdf');
   const scroller = useRef(null);
+  const searchBox = useRef(null);
   const [pdf, setPdf] = useState(null);
   const [lib, setLib] = useState(null);
   const [base, setBase] = useState(null);          // first page size at 100%
   const [err, setErr] = useState('');
-  const [fit, setFit] = useState(true);
+  const [fit, setFit] = useState('width');         // 'width' | 'page' | null (own zoom)
   const [zoom, setZoom] = useState(100);
-  const [width, setWidth] = useState(0);
+  const [rot, setRot] = useState(0);
+  const [box, setBox] = useState({ w: 0, h: 0 });
   const [page, setPage] = useState(1);
   const [pageText, setPageText] = useState('1');
+  const [thumbs, setThumbs] = useState(() => readPref('ga.thumbs', window.innerWidth > 1100));
+  const [finding, setFinding] = useState(false);
   const [term, setTerm] = useState('');
   const [hits, setHits] = useState({ list: [], cur: -1, busy: false });
   const [gettingWord, setGettingWord] = useState(false);
@@ -132,19 +179,32 @@ function PdfView({ blob, doc, onFull, extra, fromWord }) {
     return () => { alive = false; task?.destroy?.(); };
   }, [blob]);
 
-  // follow the width of the viewer (fit to width)
+  // follow the size of the viewer
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setWidth(el.clientWidth));
-    ro.observe(el); setWidth(el.clientWidth);
+    const ro = new ResizeObserver(() => setBox({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el); setBox({ w: el.clientWidth, h: el.clientHeight });
     return () => ro.disconnect();
   }, [pdf]);
 
-  const scale = !base ? 1 : fit ? Math.max(0.3, Math.min(4, (width - 40) / base.w)) : zoom / 100;
+  const turned = rot % 180 !== 0;
+  const pw = base ? (turned ? base.h : base.w) : 1, ph = base ? (turned ? base.w : base.h) : 1;
+  const clamp = (s) => Math.max(0.25, Math.min(4, s));
+  const scale = !base ? 1
+    : fit === 'width' ? clamp(Math.min(box.w - 48, 940) / pw)
+      : fit === 'page' ? clamp(Math.min((box.w - 48) / pw, (box.h - 36) / ph))
+        : zoom / 100;
   const shownZoom = Math.round(scale * 100);
 
-  // which page is on screen
+  // keep the reading place when the size changes
+  const lastScale = useRef(scale);
+  useLayoutEffect(() => {
+    const el = scroller.current, prev = lastScale.current;
+    lastScale.current = scale;
+    if (el && prev && prev !== scale) el.scrollTop = el.scrollTop * (scale / prev);
+  }, [scale]);
+
   const onScroll = () => {
     const el = scroller.current;
     if (!el) return;
@@ -153,17 +213,48 @@ function PdfView({ blob, doc, onFull, extra, fromWord }) {
     for (const node of el.querySelectorAll('.pdf-page')) { if (node.offsetTop <= mid) cur = Number(node.dataset.n); else break; }
     if (cur !== page) { setPage(cur); setPageText(String(cur)); }
   };
-  const goPage = (n) => {
+  const goPage = useCallback((n) => {
     if (!pdf) return;
     const v = Math.max(1, Math.min(pdf.numPages, Math.floor(Number(n) || 1)));
     setPage(v); setPageText(String(v));
     const el = scroller.current, node = el?.querySelector(`.pdf-page[data-n="${v}"]`);
-    if (el && node) el.scrollTop = node.offsetTop - 12;   // only the viewer scrolls, never the whole page
+    if (el && node) el.scrollTop = node.offsetTop - 16;   // only the viewer scrolls
+  }, [pdf]);
+  const zoomTo = (z) => { setFit(null); setZoom(Math.max(25, Math.min(400, Math.round(z)))); };
+  const zoomStep = (dir) => {
+    const cur = shownZoom;
+    const next = dir > 0 ? ZOOMS.find(z => z > cur + 1) ?? Math.min(400, cur + 50) : [...ZOOMS].reverse().find(z => z < cur - 1) ?? Math.max(25, cur - 25);
+    zoomTo(next);
   };
-  const setZoomFrom = (next) => { setFit(false); setZoom(Math.max(40, Math.min(400, next))); };
+  const rotate = () => setRot(r => (r + 90) % 360);
+  const toggleThumbs = () => setThumbs(t => { writePref('ga.thumbs', !t); return !t; });
+
+  // Ctrl+wheel zooms the document, Ctrl+F opens the search
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const wheel = (e) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      setFit(null);
+      setZoom(z => Math.max(25, Math.min(400, Math.round((lastScale.current * 100) * (e.deltaY < 0 ? 1.1 : 1 / 1.1)))));
+    };
+    el.addEventListener('wheel', wheel, { passive: false });
+    return () => el.removeEventListener('wheel', wheel);
+  }, [pdf]);
+  useEffect(() => {
+    const key = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault(); setFinding(true);
+        setTimeout(() => searchBox.current?.select(), 0);
+      }
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, []);
 
   // search the text of every page
-  async function pageText_(n) {
+  async function textOf(n) {
     if (!texts.current.has(n)) {
       const p = await pdf.getPage(n);
       const c = await p.getTextContent();
@@ -180,7 +271,7 @@ function PdfView({ blob, doc, onFull, extra, fromWord }) {
       setHits(h => ({ ...h, busy: true }));
       const list = [];
       for (let n = 1; n <= pdf.numPages && alive; n++) {
-        const text = await pageText_(n);
+        const text = await textOf(n);
         let at = text.indexOf(q);
         while (at >= 0) { list.push(n); at = text.indexOf(q, at + q.length); }
       }
@@ -196,67 +287,140 @@ function PdfView({ blob, doc, onFull, extra, fromWord }) {
     setHits(h => ({ ...h, cur: i }));
     goPage(hits.list[i]);
   };
+  const closeSearch = () => { setFinding(false); setTerm(''); };
 
   const downloadWord = async () => {
     setGettingWord(true);
     try { saveBlob(await loadDoc(doc), doc.name); } catch { /* shown by the browser */ } finally { setGettingWord(false); }
   };
+  const pages = pdf?.numPages || 0;
 
   return (
     <>
-      <div className="reader-bar">
-        <div className="reader-name" title={pdfName}><span className="ftype pdf">PDF</span><span>{pdfName}</span></div>
-        <div className="reader-search">
-          <Search size={15} />
-          <input value={term} placeholder="Mətndə axtar" onChange={e => setTerm(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') step(e.shiftKey ? -1 : 1); if (e.key === 'Escape') setTerm(''); }} />
-          {term.trim().length >= 2 && <span className="hit-count">{hits.busy ? '...' : hits.list.length ? `${hits.cur + 1} / ${hits.list.length}` : 'Tapılmadı'}</span>}
-          {term && <>
-            <button className="tool sm" onClick={() => step(-1)} disabled={!hits.list.length} title="Əvvəlki"><ChevronUp size={15} /></button>
-            <button className="tool sm" onClick={() => step(1)} disabled={!hits.list.length} title="Növbəti"><ChevronDown size={15} /></button>
-            <button className="tool sm" onClick={() => setTerm('')} title="Təmizlə"><X size={14} /></button>
-          </>}
-        </div>
-        <div className="tool-group">
-          <button className="tool" onClick={() => goPage(page - 1)} disabled={page <= 1} title="Əvvəlki səhifə"><ChevronLeft size={16} /></button>
-          <input className="page-input" value={pageText} inputMode="numeric" aria-label="Səhifə"
+      <Bar {...bar} after={<>
+        <button className={`vb ${finding ? 'on' : ''}`} onClick={() => { setFinding(f => !f); if (finding) setTerm(''); else setTimeout(() => searchBox.current?.focus(), 0); }} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
+        <button className="vb wide-only" onClick={() => url && printPdf(url)} title="Çap et"><Printer size={17} /></button>
+        <button className="vb" onClick={() => saveBlob(blob, pdfName)} title="PDF-i endir"><Download size={17} /></button>
+        <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
+        <Drop className="vb-more" align="right" title="Daha çox" button={<MoreHorizontal size={17} />}>
+          <button className="narrow-only" onClick={rotate}><RotateCw size={15} />Döndər</button>
+          <button className="narrow-only" onClick={() => setFit('page')}><FileText size={15} />Səhifəni sığdır</button>
+          <button className="narrow-only" onClick={() => url && printPdf(url)}><Printer size={15} />Çap et</button>
+          <a href={url || undefined} target="_blank" rel="noopener"><ExternalLink size={15} />Yeni pəncərədə aç</a>
+          {fromWord && <button onClick={downloadWord} disabled={gettingWord}>{gettingWord ? <Loader2 size={15} className="spin" /> : <FileDown size={15} />}Word orijinalını endir</button>}
+        </Drop>
+      </>}>
+        <><button className={`vb ${thumbs ? 'on' : ''}`} onClick={toggleThumbs} title="Səhifələr"><PanelLeft size={17} /></button><span className="vsep" /></>
+        <span className="vsep" />
+        <div className="vgroup">
+          <button className="vb" onClick={() => goPage(page - 1)} disabled={page <= 1} title="Əvvəlki səhifə"><ChevronUp size={17} /></button>
+          <input className="vpage" value={pageText} inputMode="numeric" aria-label="Səhifə"
             onChange={e => setPageText(e.target.value.replace(/\D/g, ''))}
             onKeyDown={e => { if (e.key === 'Enter') goPage(pageText); }} onBlur={() => goPage(pageText)} />
-          <span className="tool-label of">/ {pdf?.numPages || '…'}</span>
-          <button className="tool" onClick={() => goPage(page + 1)} disabled={!pdf || page >= pdf.numPages} title="Növbəti səhifə"><ChevronRight size={16} /></button>
+          <span className="vof">/ {pages || '…'}</span>
+          <button className="vb" onClick={() => goPage(page + 1)} disabled={!pdf || page >= pages} title="Növbəti səhifə"><ChevronDown size={17} /></button>
         </div>
-        <div className="tool-group">
-          <button className="tool" onClick={() => setZoomFrom(shownZoom - 15)} title="Kiçilt"><ZoomOut size={16} /></button>
-          <span className="tool-label">{fit ? 'Eninə' : `${shownZoom}%`}</span>
-          <button className="tool" onClick={() => setZoomFrom(shownZoom + 15)} title="Böyüt"><ZoomIn size={16} /></button>
-          <button className={`tool ${fit ? 'on' : ''}`} onClick={() => setFit(f => !f)} title="Eninə yerləşdir"><MoveHorizontal size={16} /></button>
+        <span className="vsep" />
+        <div className="vgroup">
+          <button className="vb" onClick={() => zoomStep(-1)} title="Kiçilt"><ZoomOut size={17} /></button>
+          <Drop className="vzoom" title="Ölçü" button={<>{shownZoom}%<ChevronDown size={13} /></>}>
+            <button onClick={() => setFit('width')}>{fit === 'width' ? <Check size={14} /> : <i />}Enə sığdır</button>
+            <button onClick={() => setFit('page')}>{fit === 'page' ? <Check size={14} /> : <i />}Səhifəni sığdır</button>
+            <hr />
+            {ZOOMS.map(z => <button key={z} onClick={() => zoomTo(z)}>{!fit && zoom === z ? <Check size={14} /> : <i />}{z}%</button>)}
+          </Drop>
+          <button className="vb" onClick={() => zoomStep(1)} title="Böyüt"><ZoomIn size={17} /></button>
+          <button className={`vb ${fit === 'width' ? 'on' : ''}`} onClick={() => setFit('width')} title="Enə sığdır"><MoveHorizontal size={17} /></button>
+          <button className={`vb wide-only ${fit === 'page' ? 'on' : ''}`} onClick={() => setFit('page')} title="Səhifəni sığdır"><FileText size={17} /></button>
+          <button className="vb wide-only" onClick={rotate} title="Döndər"><RotateCw size={17} /></button>
         </div>
-        <div className="tool-group">
-          <button className="tool" onClick={onFull} title="Tam ekran"><Maximize2 size={16} /></button>
-          <a className="tool" href={url || undefined} target="_blank" rel="noopener" title="Yeni pəncərədə aç"><ExternalLink size={16} /></a>
-          <button className="tool" onClick={() => saveBlob(blob, pdfName)} title="PDF-i endir"><Download size={16} /></button>
-          {fromWord && (
-            <button className="tool" onClick={downloadWord} disabled={gettingWord} title="Word orijinalını endir">
-              {gettingWord ? <Loader2 size={16} className="spin" /> : <FileDown size={16} />}
-            </button>
-          )}
+      </Bar>
+
+      <div className="vbody">
+        {thumbs && pdf && base && <Thumbs pdf={pdf} base={base} rot={rot} page={page} onGo={goPage} />}
+        <div className="pdf-scroller" ref={scroller} onScroll={onScroll}>
+          {err ? <div className="viewer-state bad"><AlertTriangle size={22} /><strong>PDF açılmadı</strong><span>{err}</span></div>
+            : !pdf || !base ? <div className="viewer-state"><Loader2 size={22} className="spin" /><strong>Səhifələr hazırlanır</strong></div>
+              : Array.from({ length: pages }, (_, i) => (
+                <PdfPage key={i + 1} lib={lib} pdf={pdf} n={i + 1} scale={scale} rot={rot} base={{ w: pw, h: ph }} root={scroller}
+                  term={term.trim().length >= 2 ? lowerAz(term.trim()) : ''} current={hits.list[hits.cur] === i + 1} />
+              ))}
         </div>
-        {extra}
-      </div>
-      <div className="pdf-scroller" ref={scroller} onScroll={onScroll}>
-        {err ? <div className="reader-state bad"><AlertTriangle size={22} /><strong>PDF açılmadı</strong><span>{err}</span></div>
-          : !pdf || !base ? <div className="reader-state"><Loader2 size={22} className="spin" /><strong>Səhifələr hazırlanır</strong></div>
-            : Array.from({ length: pdf.numPages }, (_, i) => (
-              <PdfPage key={i + 1} lib={lib} pdf={pdf} n={i + 1} scale={scale} base={base} root={scroller}
-                term={term.trim().length >= 2 ? lowerAz(term.trim()) : ''} current={hits.list[hits.cur] === i + 1} />
-            ))}
+        {finding && (
+          <div className="vfind">
+            <Search size={15} />
+            <input ref={searchBox} value={term} placeholder="Mətndə axtar" autoFocus onChange={e => setTerm(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') step(e.shiftKey ? -1 : 1); if (e.key === 'Escape') closeSearch(); }} />
+            {term.trim().length >= 2 && <span className="vfind-n">{hits.busy ? '...' : hits.list.length ? `${hits.cur + 1} / ${hits.list.length}` : 'Tapılmadı'}</span>}
+            <button onClick={() => step(-1)} disabled={!hits.list.length} title="Əvvəlki"><ChevronUp size={15} /></button>
+            <button onClick={() => step(1)} disabled={!hits.list.length} title="Növbəti"><ChevronDown size={15} /></button>
+            <button onClick={closeSearch} title="Bağla"><X size={15} /></button>
+          </div>
+        )}
       </div>
     </>
   );
 }
 
+// page thumbnails on the left of the document
+function Thumbs({ pdf, base, rot, page, onGo }) {
+  const pane = useRef(null);
+  useEffect(() => {
+    const el = pane.current, node = el?.querySelector(`[data-t="${page}"]`);
+    if (!el || !node) return;
+    const top = node.offsetTop, bottom = top + node.offsetHeight;
+    if (top < el.scrollTop + 8 || bottom > el.scrollTop + el.clientHeight - 8) el.scrollTop = top - el.clientHeight / 3;
+  }, [page]);
+  return (
+    <aside className="thumbs" ref={pane} aria-label="Səhifələr">
+      {Array.from({ length: pdf.numPages }, (_, i) => (
+        <Thumb key={i + 1} pdf={pdf} n={i + 1} base={base} rot={rot} on={page === i + 1} root={pane} onGo={onGo} />
+      ))}
+    </aside>
+  );
+}
+
+const THUMB_W = 96;
+function Thumb({ pdf, n, base, rot, on, root, onGo }) {
+  const box = useRef(null);
+  const canvas = useRef(null);
+  const [near, setNear] = useState(n <= 6);
+  const [ratio, setRatio] = useState(null);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => { if (e.isIntersecting) setNear(true); }, { root: root.current, rootMargin: '600px 0px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [root]);
+  useEffect(() => {
+    if (!near) return;
+    let alive = true, task = null;
+    (async () => {
+      const p = await pdf.getPage(n);
+      if (!alive) return;
+      const v1 = p.getViewport({ scale: 1, rotation: (p.rotate + rot) % 360 });
+      setRatio(v1.height / v1.width);
+      const vp = p.getViewport({ scale: THUMB_W / v1.width, rotation: (p.rotate + rot) % 360 });
+      const c = canvas.current;
+      if (!c) return;
+      c.width = Math.floor(vp.width * 2); c.height = Math.floor(vp.height * 2);
+      task = p.render({ canvasContext: c.getContext('2d'), viewport: vp, transform: [2, 0, 0, 2, 0, 0] });
+      try { await task.promise; } catch { /* cancelled */ }
+    })();
+    return () => { alive = false; task?.cancel?.(); };
+  }, [near, pdf, n, rot]);
+  const h = THUMB_W * (ratio || (rot % 180 ? base.w / base.h : base.h / base.w));
+  return (
+    <button className={`thumb ${on ? 'on' : ''}`} data-t={n} ref={box} onClick={() => onGo(n)} title={`Səhifə ${n}`}>
+      <span className="thumb-img" style={{ width: THUMB_W, height: h }}>{near && <canvas ref={canvas} style={{ width: THUMB_W, height: h }} />}</span>
+      <span className="thumb-n">{n}</span>
+    </button>
+  );
+}
+
 // one page: drawn when it comes near the screen
-function PdfPage({ lib, pdf, n, scale, base, root, term, current }) {
+function PdfPage({ lib, pdf, n, scale, rot, base, root, term, current }) {
   const box = useRef(null);
   const canvas = useRef(null);
   const textDiv = useRef(null);
@@ -278,9 +442,10 @@ function PdfPage({ lib, pdf, n, scale, base, root, term, current }) {
     (async () => {
       const p = await pdf.getPage(n);
       if (!alive) return;
-      const v1 = p.getViewport({ scale: 1 });
+      const rotation = (p.rotate + rot) % 360;
+      const v1 = p.getViewport({ scale: 1, rotation });
       setSize({ w: v1.width, h: v1.height });
-      const vp = p.getViewport({ scale });
+      const vp = p.getViewport({ scale, rotation });
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const c = canvas.current;
       if (!c) return;
@@ -297,7 +462,7 @@ function PdfPage({ lib, pdf, n, scale, base, root, term, current }) {
       if (alive) setDrawn(d => d + 1);
     })();
     return () => { alive = false; task?.cancel?.(); layer?.cancel?.(); };
-  }, [near, scale, pdf, n, lib]);
+  }, [near, scale, rot, pdf, n, lib]);
 
   // mark the words that match the search
   useEffect(() => {
@@ -340,16 +505,19 @@ function PdfProgress({ doc }) {
   );
 }
 
-function WordView({ blob, doc, onFull, extra }) {
+/* ------------------------------ Word, until its PDF is ready ------------------------------ */
+function WordView({ blob, doc, bar }) {
   const [parsed, setParsed] = useState(null);
   const [err, setErr] = useState('');
-  const [zoom, setZoom] = useState(() => Math.round(100 * (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale')) || 1)));
+  const [zoom, setZoom] = useState(100);
+  const [finding, setFinding] = useState(false);
   const [term, setTerm] = useState('');
   const [hits, setHits] = useState({ n: 0, cur: -1 });
   const [pages, setPages] = useState(1);
   const [page, setPage] = useState(1);
   const frame = useRef(null);
   const marks = useRef([]);
+  const searchBox = useRef(null);
 
   useEffect(() => {
     let alive = true;
@@ -375,15 +543,22 @@ function WordView({ blob, doc, onFull, extra }) {
     if (!d) return;
     applyZoom();
     setPages(d.querySelectorAll('div.docpage').length || 1);
-    // track which page is on screen
     d.addEventListener('scroll', () => {
       const all = d.querySelectorAll('div.docpage');
       let cur = 1;
       all.forEach((p, i) => { if (p.getBoundingClientRect().top < 120) cur = i + 1; });
       setPage(cur);
     }, { passive: true });
+    d.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); setFinding(true); setTimeout(() => searchBox.current?.select(), 0); }
+    });
     if (term) runSearch(term);
   };
+  useEffect(() => {
+    const key = (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); setFinding(true); setTimeout(() => searchBox.current?.select(), 0); } };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, []);
 
   function clearMarks() {
     for (const m of marks.current) {
@@ -394,7 +569,6 @@ function WordView({ blob, doc, onFull, extra }) {
     }
     marks.current = [];
   }
-
   function runSearch(q) {
     const d = docOf();
     if (!d?.body) return;
@@ -408,11 +582,10 @@ function WordView({ blob, doc, onFull, extra }) {
     for (const node of nodes) {
       if (found.length >= 2000) break;
       const low = node.nodeValue.toLocaleLowerCase('az');
-      if (low.length !== node.nodeValue.length) continue;   // lower-casing changed the length: offsets would drift
+      if (low.length !== node.nodeValue.length) continue;
       const at = [];
       for (let i = low.indexOf(needle); i >= 0; i = low.indexOf(needle, i + needle.length)) at.push(i);
       if (!at.length) continue;
-      // wrap from the end so the earlier offsets stay valid
       const here = [];
       for (let k = at.length - 1; k >= 0; k--) {
         const hit = node.splitText(at[k]);
@@ -429,7 +602,6 @@ function WordView({ blob, doc, onFull, extra }) {
     setHits({ n: found.length, cur: found.length ? 0 : -1 });
     if (found.length) focusHit(0, found);
   }
-
   function focusHit(i, list = marks.current) {
     list.forEach(m => m.classList.remove('cur'));
     const m = list[i];
@@ -443,8 +615,6 @@ function WordView({ blob, doc, onFull, extra }) {
     setHits(h => ({ ...h, cur: i }));
     focusHit(i);
   };
-
-  // search as you type, a little after the last key
   useEffect(() => {
     if (!parsed) return;
     const t = setTimeout(() => runSearch(term), 250);
@@ -457,57 +627,63 @@ function WordView({ blob, doc, onFull, extra }) {
     d?.getElementById(`page=${v}`)?.scrollIntoView({ block: 'start' });
     setPage(v);
   };
+  const closeSearch = () => { setFinding(false); setTerm(''); };
 
   if (err) {
     return (
-      <div className="reader-state bad">
-        <AlertTriangle size={22} />
-        <strong>Sənədin mətni oxunmadı</strong>
-        <span>{err}</span>
-        <button className="btn small" onClick={() => saveBlob(blob, doc.name)}><Download size={14} />Orijinal faylı endir</button>
-      </div>
+      <>
+        <Bar {...bar} />
+        <div className="viewer-state bad">
+          <AlertTriangle size={22} />
+          <strong>Sənədin mətni oxunmadı</strong>
+          <span>{err}</span>
+          <button className="btn small" onClick={() => saveBlob(blob, doc.name)}><Download size={14} />Orijinal faylı endir</button>
+        </div>
+      </>
     );
-  }
-  if (!parsed) {
-    return <div className="reader-state"><Loader2 size={22} className="spin" /><strong>Sənəd hazırlanır</strong><span>{doc.name}</span></div>;
   }
 
   return (
     <>
-      <div className="reader-bar">
-        <div className="reader-name" title={doc.name}><span className="ftype word">{doc.ext?.toUpperCase() || 'DOC'}</span><span>{doc.name}</span></div>
-        <div className="reader-search">
-          <Search size={15} />
-          <input value={term} placeholder="Mətndə axtar" onChange={e => setTerm(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') step(e.shiftKey ? -1 : 1); if (e.key === 'Escape') setTerm(''); }} />
-          {term.trim().length >= 2 && <span className="hit-count">{hits.n ? `${hits.cur + 1} / ${hits.n}` : 'Tapılmadı'}</span>}
-          {term && <>
-            <button className="tool sm" onClick={() => step(-1)} disabled={!hits.n} title="Əvvəlki"><ChevronUp size={15} /></button>
-            <button className="tool sm" onClick={() => step(1)} disabled={!hits.n} title="Növbəti"><ChevronDown size={15} /></button>
-            <button className="tool sm" onClick={() => setTerm('')} title="Təmizlə"><X size={14} /></button>
-          </>}
+      <Bar {...bar} after={<>
+        <button className={`vb ${finding ? 'on' : ''}`} onClick={() => { setFinding(f => !f); if (finding) setTerm(''); else setTimeout(() => searchBox.current?.focus(), 0); }} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
+        <button className="vb" onClick={() => frame.current?.contentWindow?.print()} title="Çap et"><Printer size={17} /></button>
+        <button className="vb" onClick={() => saveBlob(blob, doc.name)} title="Word faylını endir"><Download size={17} /></button>
+        <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
+      </>}>
+        <></>
+        <span className="vsep" />
+        <div className="vgroup">
+          <button className="vb" onClick={() => goPage(page - 1)} disabled={page <= 1} title="Əvvəlki səhifə"><ChevronUp size={17} /></button>
+          <span className="vof">{page} / {pages}</span>
+          <button className="vb" onClick={() => goPage(page + 1)} disabled={page >= pages} title="Növbəti səhifə"><ChevronDown size={17} /></button>
         </div>
-        {pages > 1 && (
-          <div className="tool-group">
-            <button className="tool" onClick={() => goPage(page - 1)} disabled={page <= 1} title="Əvvəlki səhifə"><ChevronLeft size={16} /></button>
-            <span className="tool-label">{page} / {pages}</span>
-            <button className="tool" onClick={() => goPage(page + 1)} disabled={page >= pages} title="Növbəti səhifə"><ChevronRight size={16} /></button>
+        <span className="vsep" />
+        <div className="vgroup">
+          <button className="vb" onClick={() => setZoom(z => Math.max(50, z - 10))} title="Kiçilt"><ZoomOut size={17} /></button>
+          <Drop className="vzoom" title="Ölçü" button={<>{zoom}%<ChevronDown size={13} /></>}>
+            {[60, 80, 100, 120, 150, 200].map(z => <button key={z} onClick={() => setZoom(z)}>{zoom === z ? <Check size={14} /> : <i />}{z}%</button>)}
+          </Drop>
+          <button className="vb" onClick={() => setZoom(z => Math.min(250, z + 10))} title="Böyüt"><ZoomIn size={17} /></button>
+        </div>
+      </Bar>
+      <PdfProgress doc={doc} />
+      <div className="vbody">
+        {!parsed
+          ? <div className="viewer-state"><Loader2 size={22} className="spin" /><strong>Sənəd hazırlanır</strong><span>{doc.name}</span></div>
+          : <iframe ref={frame} className="word-frame" title={doc.name} sandbox="allow-same-origin allow-modals" srcDoc={html} onLoad={onLoad} />}
+        {finding && (
+          <div className="vfind">
+            <Search size={15} />
+            <input ref={searchBox} value={term} placeholder="Mətndə axtar" autoFocus onChange={e => setTerm(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') step(e.shiftKey ? -1 : 1); if (e.key === 'Escape') closeSearch(); }} />
+            {term.trim().length >= 2 && <span className="vfind-n">{hits.n ? `${hits.cur + 1} / ${hits.n}` : 'Tapılmadı'}</span>}
+            <button onClick={() => step(-1)} disabled={!hits.n} title="Əvvəlki"><ChevronUp size={15} /></button>
+            <button onClick={() => step(1)} disabled={!hits.n} title="Növbəti"><ChevronDown size={15} /></button>
+            <button onClick={closeSearch} title="Bağla"><X size={15} /></button>
           </div>
         )}
-        <div className="tool-group">
-          <button className="tool" onClick={() => setZoom(z => Math.max(60, z - 10))} title="Kiçilt"><ZoomOut size={16} /></button>
-          <span className="tool-label">{zoom}%</span>
-          <button className="tool" onClick={() => setZoom(z => Math.min(220, z + 10))} title="Böyüt"><ZoomIn size={16} /></button>
-        </div>
-        <div className="tool-group">
-          <button className="tool" onClick={onFull} title="Tam ekran"><Maximize2 size={16} /></button>
-          <button className="tool" onClick={() => saveBlob(blob, doc.name)} title="Orijinal faylı endir"><Download size={16} /></button>
-        </div>
-        {extra}
       </div>
-      <PdfProgress doc={doc} />
-      <iframe ref={frame} className="reader-frame word" title={doc.name} sandbox="allow-same-origin" srcDoc={html} onLoad={onLoad} />
-      <div className="reader-note">Word sənədinin brauzerdə sadələşdirilmiş görünüşüdür. Orijinal rəng, qrafik və tərtibat üçün faylı endirin.</div>
     </>
   );
 }

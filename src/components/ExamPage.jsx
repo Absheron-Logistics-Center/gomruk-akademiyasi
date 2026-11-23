@@ -1,10 +1,9 @@
 import { useState } from 'react';
-import { GraduationCap, Plus, Replace, Trash2, Pencil, Timer, Download, Loader2, FileQuestion, ChevronLeft, ChevronRight } from 'lucide-react';
-import Topbar from './Topbar.jsx';
+import { GraduationCap, Plus, RefreshCw, Trash2, Timer, Download, Loader2, FileQuestion } from 'lucide-react';
 import Workspace from './Workspace.jsx';
 import TestPanel from './TestPanel.jsx';
 import AddDialog from './AddDialog.jsx';
-import { Missing } from './LessonPage.jsx';
+import { Missing, FileTag } from './LessonPage.jsx';
 import { useUi } from './ui.jsx';
 import { api } from '../lib/api.js';
 import { go } from '../lib/nav.js';
@@ -23,28 +22,15 @@ export default function ExamPage(props) {
   const prev = index > 0 ? catalog.exams[index - 1] : null;
   const next = index >= 0 && index < (catalog?.exams.length || 0) - 1 ? catalog.exams[index + 1] : null;
 
-  if (!catalog) return <><Topbar {...props} back={back} backLabel="Dərslər" /><div className="page-wrap"><div className="empty-state"><Loader2 size={18} className="spin" />Yüklənir</div></div></>;
+  if (!catalog) return <Workspace {...props} active={{ type: 'exam', id }} title="Yüklənir"><div className="empty-state"><Loader2 size={18} className="spin" />Yüklənir</div></Workspace>;
   if (!exam) {
     return (
-      <>
-        <Topbar {...props} back={back} backLabel="Dərslər" />
-        <div className="page-wrap"><Missing icon={FileQuestion} title="Sınaq tapılmadı" text="Ünvan səhvdir." action={<button className="btn primary small" onClick={back}>Geri qayıt</button>} /></div>
-      </>
+      <Workspace {...props} active={{ type: 'exam', id }} title="Sınaq tapılmadı">
+        <Missing icon={FileQuestion} title="Sınaq tapılmadı" text="Bu sınaq silinib və ya ünvan səhvdir." action={<button className="btn primary small" onClick={back}>Dərslərə qayıt</button>} />
+      </Workspace>
     );
   }
 
-  async function rename() {
-    const title = await prompt({ title: 'Sınağın adını dəyiş', label: 'Ad', value: exam.title });
-    if (!title || title === exam.title) return;
-    try { await api.saveExam(exam.id, { title }); await reload(); toast('Ad dəyişdirildi.'); }
-    catch (e) { toast(e.message, 'error'); }
-  }
-  async function removeExam() {
-    const ok = await confirm({ title: `"${exam.title}" silinsin?`, danger: true, confirmLabel: 'Sınağı sil', text: `${exam.tests ? 'Bu sınaq və onun test bankı' : 'Bu sınaq'} silinəcək. Silinmə hamı üçündür və geri qaytarılmır.` });
-    if (!ok) return;
-    try { await api.deleteExam(exam.id); dropSession(user?.username, `exam:${exam.id}`); await reload(); toast('Sınaq silindi.'); go('/'); }
-    catch (e) { toast(e.message, 'error'); }
-  }
   async function setLimit() {
     const v = await prompt({ title: 'Sınağın vaxtı', label: 'Dəqiqə (0 = vaxt göstərilmir)', value: exam.timeLimitMin || 0, type: 'number', min: 0, max: 600 });
     if (v === null || v === undefined) return;
@@ -71,28 +57,19 @@ export default function ExamPage(props) {
   return (
     <>
       <Workspace {...props} active={{ type: 'exam', id: exam.id }}
-        title={exam.title}
-        subtitle={`Yekun sınaq ${index + 1} / ${catalog.exams.length}`}
-        tools={<>
-          <button className="tb-tool" title="Əvvəlki sınaq" disabled={!prev} onClick={() => prev && go(`/sinaq/${prev.id}`)}><ChevronLeft size={15} /></button>
-          <button className="tb-tool" title="Növbəti sınaq" disabled={!next} onClick={() => next && go(`/sinaq/${next.id}`)}><ChevronRight size={15} /></button>
-          <span className="tool-sep" />
-          <button className="tb-tool" title="Adını dəyiş" onClick={rename}><Pencil size={14} /></button>
-          <button className="tb-tool danger" title="Sınağı sil" onClick={removeExam}><Trash2 size={14} /></button>
-        </>}>
-      <div className="ws-page">
-
-        <section className="tab-body">
-          <div className="section-bar">
-            <div className="doc-chips">
-              {exam.tests?.source && <span className="doc-chip on static"><span className="ftype word">{extOf(exam.tests.source.name).toUpperCase()}</span><span className="doc-chip-name">{exam.tests.source.name.replace(/\.[^.]+$/, '')}</span></span>}
-              <button className="doc-chip" onClick={setLimit} title="Vaxtı dəyiş"><Timer size={14} />{exam.timeLimitMin ? `${exam.timeLimitMin} dəqiqə` : 'Vaxt yoxdur'}</button>
-            </div>
-            <div className="section-actions">
-              <button className="action-btn" onClick={() => setDialog(true)}>{exam.tests ? <><Replace size={14} />Dəyişdir</> : <><Plus size={14} />Test bankı əlavə et</>}</button>
-              {exam.tests?.source && <button className="action-btn" onClick={downloadSource} disabled={downloading}>{downloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}Word faylı</button>}
-              {exam.tests && <button className="action-btn action-btn-danger" onClick={removeTests}><Trash2 size={14} />Sil</button>}
-            </div>
+        kicker={`Yekun sınaq ${index + 1} / ${catalog.exams.length}`} title={exam.title}
+        nav={{ prev: prev && `/sinaq/${prev.id}`, next: next && `/sinaq/${next.id}` }}>
+        <div className="test-page">
+          <div className="test-bar">
+            {exam.tests?.source
+              ? <span className="vfile-one" title={exam.tests.source.name}><FileTag name={exam.tests.source.name} /><em>{exam.tests.count} sual</em></span>
+              : <span className="test-bar-title">Test bankı</span>}
+            <button className="vchip" onClick={setLimit} title="Vaxtı dəyiş"><Timer size={14} />{exam.timeLimitMin ? `${exam.timeLimitMin} dəqiqə` : 'Vaxt yoxdur'}</button>
+            <span className="vbar-grow" />
+            {exam.tests?.source && <button className="vb" onClick={downloadSource} disabled={downloading} title="Word faylını endir">{downloading ? <Loader2 size={16} className="spin" /> : <Download size={16} />}</button>}
+            {exam.tests && <button className="vb" onClick={() => setDialog(true)} title="Test bankını dəyişdir"><RefreshCw size={16} /></button>}
+            {exam.tests && <button className="vb danger" onClick={removeTests} title="Test bankını sil"><Trash2 size={16} /></button>}
+            {!exam.tests && <button className="vadd" onClick={() => setDialog(true)}><Plus size={15} />Test bankı</button>}
           </div>
           {exam.tests ? (
             <TestPanel key={`${exam.id}:${exam.tests.updatedAt}`} type="exam" id={exam.id} name={exam.title} tests={exam.tests} limitMin={exam.timeLimitMin} user={user}
@@ -101,8 +78,7 @@ export default function ExamPage(props) {
             <Missing icon={GraduationCap} title="Test bankı əlavə edilməyib" text="Yekun sınaq yalnız testdən ibarətdir. Word test bankını əlavə edin, istəsəniz vaxt da təyin edin."
               action={<button className="btn primary small" onClick={() => setDialog(true)}><Plus size={14} />Test bankı əlavə et</button>} />
           )}
-        </section>
-      </div>
+        </div>
       </Workspace>
       {dialog && <AddDialog kind="section" edit={{ owner: exam.id, ownerTitle: exam.title, section: 'tests', replace: exam.tests, isExam: true }} catalog={catalog}
         onClose={() => setDialog(false)} onDone={async () => { setDialog(false); await reload(); }} />}

@@ -76,11 +76,21 @@ export default function TestPanel({ type, id, name, tests, limitMin = 0, user, o
     finally { setLoading(false); }
   }
 
-  async function restart() {
-    if (s?.stage === 'running' && !await confirm({ title: 'Test yenidən başlasın?', text: 'Bu cəhdin bütün cavabları və işarələri silinəcək.', confirmLabel: 'Yenidən başla', danger: true })) return;
-    const m = s?.mode || mode;
+  // back to the start page, where the mode can be chosen again
+  function restart() {
+    if (s?.mode) setMode(type === 'exam' ? 'exam' : s.mode);
     dropSession(uname, key); setS(null);
-    await start(m);
+    scrollTop();
+  }
+  // stop a test that is still going: nothing of it is kept
+  async function cancel() {
+    const ok = await confirm({
+      title: 'Test ləğv edilsin?', danger: true, confirmLabel: 'Testi ləğv et',
+      text: `${answered(s)} / ${s.questions.length} sual cavablandırılıb. Ləğv etsəniz bu cəhdin cavabları və işarələri silinəcək və nəticə hesablanmayacaq.`
+    });
+    if (!ok) return;
+    restart();
+    toast('Test ləğv edildi.');
   }
 
   async function finish() {
@@ -181,7 +191,7 @@ export default function TestPanel({ type, id, name, tests, limitMin = 0, user, o
         </div>
         <div className="intro-actions">
           <button className="btn primary big" onClick={() => setS(resume(s))}><Play size={16} />Davam et</button>
-          <button className="btn" onClick={restart}><RotateCcw size={15} />Yenidən başla</button>
+          <button className="btn" onClick={cancel}><XCircle size={15} />Testi ləğv et</button>
         </div>
       </div>
     );
@@ -212,6 +222,7 @@ export default function TestPanel({ type, id, name, tests, limitMin = 0, user, o
         <span className="test-stat"><CheckCircle2 size={14} />Cavablandırılıb <b>{done}</b></span>
         <span className="test-stat"><Circle size={14} />Cavabsız <b>{n - done}</b></span>
         <span className="test-progress"><span style={{ width: `${(done / n) * 100}%` }} /></span>
+        <button className="btn small test-cancel" onClick={cancel}><XCircle size={14} />Ləğv et</button>
       </div>
       {over ? <div className="note-box warn">Planlaşdırılmış vaxt bitib. Testi dayandırmadan davam etdirə bilərsiniz.</div> : null}
 
@@ -255,7 +266,7 @@ export default function TestPanel({ type, id, name, tests, limitMin = 0, user, o
             <span><i />Cavabsız</span>
           </div>
           <button className="btn primary full" onClick={finish}>Testi yekunlaşdır</button>
-          <button className="btn full ghost-btn" onClick={restart}><RotateCcw size={14} />Yenidən başla</button>
+          <button className="btn full ghost-btn test-cancel-side" onClick={cancel}><XCircle size={14} />Testi ləğv et</button>
         </aside>
       </div>
     </div>

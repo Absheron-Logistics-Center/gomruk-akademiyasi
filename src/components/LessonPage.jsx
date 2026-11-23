@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  FileText, BookOpen, ListChecks, Plus, Replace, Trash2, Pencil, Download, Loader2, ChevronLeft, ChevronRight, FileQuestion
-} from 'lucide-react';
-import Topbar from './Topbar.jsx';
-import Workspace from './Workspace.jsx';
+import { FileText, BookOpen, ListChecks, Plus, RefreshCw, Trash2, Download, Loader2, ChevronDown, FileQuestion } from 'lucide-react';
+import Workspace, { Seg } from './Workspace.jsx';
+import Drop from './Drop.jsx';
 import Reader from './Reader.jsx';
 import TestPanel from './TestPanel.jsx';
 import AddDialog from './AddDialog.jsx';
@@ -40,45 +38,21 @@ export default function LessonPage(props) {
     : current === 'izah' ? lesson?.explanation || null : null;
 
   useEffect(() => { if (selected && !originals.some(d => d.id === selected)) setSelected(null); }, [originals, selected]);
-  useEffect(() => { window.scrollTo(0, 0); }, [id]);
 
   const setTab = (t) => go(`/ders/${id}/${t}`);
   const back = () => go('/');
 
   if (!catalog) {
-    return <><Topbar {...props} back={back} backLabel="Dərslər" /><div className="page-wrap"><div className="empty-state"><Loader2 size={18} className="spin" />Yüklənir</div></div></>;
+    return <Workspace {...props} active={{ type: 'lesson', id }} title="Yüklənir"><div className="empty-state"><Loader2 size={18} className="spin" />Yüklənir</div></Workspace>;
   }
   if (!lesson) {
     return (
-      <>
-        <Topbar {...props} back={back} backLabel="Dərslər" />
-        <div className="page-wrap">
-          <div className="ga-card ga-empty">
-            <FileQuestion size={26} />
-            <strong>Dərs tapılmadı</strong>
-            <span>Bu dərs silinib və ya ünvan səhvdir.</span>
-            <button className="btn primary small" onClick={back}>Dərslərə qayıt</button>
-          </div>
-        </div>
-      </>
+      <Workspace {...props} active={{ type: 'lesson', id }} title="Dərs tapılmadı">
+        <Missing icon={FileQuestion} title="Dərs tapılmadı" text="Bu dərs silinib və ya ünvan səhvdir." action={<button className="btn primary small" onClick={back}>Dərslərə qayıt</button>} />
+      </Workspace>
     );
   }
 
-  async function rename() {
-    const title = await prompt({ title: 'Dərsin adını dəyiş', label: 'Dərsin adı', value: lesson.title });
-    if (!title || title === lesson.title) return;
-    try { await api.renameLesson(lesson.id, title); await reload(); toast('Dərsin adı dəyişdirildi.'); }
-    catch (e) { toast(e.message, 'error'); }
-  }
-  async function removeLesson() {
-    const ok = await confirm({
-      title: 'Dərs silinsin?', danger: true, confirmLabel: 'Dərsi sil',
-      text: `"${lesson.title}" və onun bütün sənədləri, izahı və testləri silinəcək. Silinmə hamı üçündür və geri qaytarılmır.`
-    });
-    if (!ok) return;
-    try { await api.deleteLesson(lesson.id); dropSession(user?.username, `lesson:${lesson.id}`); await reload(); toast('Dərs silindi.'); go('/'); }
-    catch (e) { toast(e.message, 'error'); }
-  }
   async function removeSection(section, d) {
     const what = section === 'original' ? `"${d.name}" sənədi` : section === 'explanation' ? 'İzahlı material' : 'Bu dərsin test bankı';
     const ok = await confirm({
@@ -105,87 +79,53 @@ export default function LessonPage(props) {
 
   const openDialog = (section, replace) => setDialog({ owner: lesson.id, ownerTitle: lesson.title, section, replace });
   const counts = { original: originals.length, izah: lesson.explanation ? 1 : 0, test: lesson.tests?.count || 0 };
+  const seg = <Seg value={current} onChange={setTab} items={TABS.map(t => ({ key: t.key, label: t.short, count: counts[t.key] }))} />;
+
+  const picker = current === 'original' && originals.length > 1 ? (
+    <Drop className="vfile-pick" title="Sənədi seç" button={<><FileTag name={doc.name} /><ChevronDown size={14} /></>}>
+      {originals.map(d => (
+        <button key={d.id} onClick={() => setSelected(d.id)} className={d.id === doc.id ? 'on' : ''}>
+          <span className={`ftype ${extOf(d.name) === 'pdf' ? 'pdf' : 'word'}`}>{extOf(d.name) === 'pdf' ? 'PDF' : extOf(d.name).toUpperCase()}</span>
+          <span className="drop-name">{d.name.replace(/\.[^.]+$/, '')}</span>
+          <em>{fmtSize(d.size)}</em>
+        </button>
+      ))}
+    </Drop>
+  ) : doc ? <span className="vfile-one" title={doc.name}><FileTag name={doc.name} /></span> : null;
+
+  const docActions = (section) => <>
+    <button className="vb" onClick={() => openDialog(section, doc)} title="Faylı dəyişdir"><RefreshCw size={16} /></button>
+    <button className="vb danger" onClick={() => removeSection(section, doc)} title="Faylı sil"><Trash2 size={16} /></button>
+    {section === 'original' && <button className="vadd" onClick={() => openDialog('original')}><Plus size={15} />Sənəd</button>}
+  </>;
 
   return (
     <>
       <Workspace {...props} active={{ type: 'lesson', id: lesson.id, tab: current }}
-        title={lesson.title}
-        subtitle={`Dərs ${index + 1} / ${catalog.lessons.length} · ${TABS.find(t => t.key === current)?.label || ''}`}
-        tools={<>
-          <button className="tb-tool" title="Əvvəlki dərs" disabled={!prev} onClick={() => prev && go(`/ders/${prev.id}`)}><ChevronLeft size={15} /></button>
-          <button className="tb-tool" title="Növbəti dərs" disabled={!next} onClick={() => next && go(`/ders/${next.id}`)}><ChevronRight size={15} /></button>
-          <span className="tool-sep" />
-          <button className="tb-tool" title="Adını dəyiş" onClick={rename}><Pencil size={14} /></button>
-          <button className="tb-tool danger" title="Dərsi sil" onClick={removeLesson}><Trash2 size={14} /></button>
-        </>}>
-      <div className="ws-page">
+        kicker={`Dərs ${index + 1}`} title={lesson.title} seg={seg} fill={current !== 'test'}
+        nav={{ prev: prev && `/ders/${prev.id}/${current}`, next: next && `/ders/${next.id}/${current}` }}>
 
-        <nav className="tabs ws-tabs" role="tablist">
-          {TABS.map(t => {
-            const Icon = t.icon;
-            return (
-              <button key={t.key} role="tab" aria-selected={current === t.key} className={`tab ${current === t.key ? 'on' : ''}`} onClick={() => setTab(t.key)}>
-                <Icon size={16} />
-                <span className="tab-long">{t.label}</span><span className="tab-short">{t.short}</span>
-                <span className={`tab-count ${counts[t.key] ? '' : 'zero'}`}>{t.key === 'test' ? (counts.test ? `${counts.test}` : '0') : counts[t.key]}</span>
-              </button>
-            );
-          })}
-        </nav>
+        {current === 'original' && (doc
+          ? <Reader key={doc.id} doc={doc} label="Normativ sənəd" fileSlot={picker} actions={docActions('original')} />
+          : <Missing icon={FileText} title="Normativ sənəd əlavə edilməyib" text="Bu dərsə aid Word və ya PDF normativ aktları əlavə edin. Bir neçə sənəd əlavə etmək olar. Word faylları avtomatik PDF-ə çevrilir."
+            action={<button className="btn primary small" onClick={() => openDialog('original')}><Plus size={14} />Sənəd əlavə et</button>} />)}
 
-        {current === 'original' && (
-          <section className="tab-body">
-            <div className="section-bar">
-              <div className="doc-chips">
-                {originals.map(d => (
-                  <button key={d.id} className={`doc-chip ${doc?.id === d.id ? 'on' : ''}`} onClick={() => setSelected(d.id)} title={`${d.name} · ${fmtSize(d.size)}`}>
-                    <span className={`ftype ${extOf(d.name) === 'pdf' ? 'pdf' : 'word'}`}>{extOf(d.name).toUpperCase()}</span>
-                    <span className="doc-chip-name">{d.name.replace(/\.[^.]+$/, '')}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="section-actions">
-                <button className="action-btn" onClick={() => openDialog('original')}><Plus size={14} />Əlavə et</button>
-                {doc && <button className="action-btn" onClick={() => openDialog('original', doc)}><Replace size={14} />Dəyişdir</button>}
-                {doc && <button className="action-btn action-btn-danger" onClick={() => removeSection('original', doc)}><Trash2 size={14} />Sil</button>}
-              </div>
-            </div>
-            {doc ? <Reader key={doc.id} doc={doc} label="Normativ sənəd" /> : (
-              <Missing icon={FileText} title="Normativ sənəd əlavə edilməyib" text="Bu dərsə aid Word və ya PDF normativ aktları əlavə edin. Bir neçə sənəd əlavə etmək olar."
-                action={<button className="btn primary small" onClick={() => openDialog('original')}><Plus size={14} />Sənəd əlavə et</button>} />
-            )}
-          </section>
-        )}
-
-        {current === 'izah' && (
-          <section className="tab-body">
-            <div className="section-bar">
-              <div className="doc-chips">
-                {doc && <span className="doc-chip on static"><span className={`ftype ${extOf(doc.name) === 'pdf' ? 'pdf' : 'word'}`}>{extOf(doc.name).toUpperCase()}</span><span className="doc-chip-name">{doc.name.replace(/\.[^.]+$/, '')}</span></span>}
-              </div>
-              <div className="section-actions">
-                <button className="action-btn" onClick={() => openDialog('explanation', doc)}>{doc ? <><Replace size={14} />Dəyişdir</> : <><Plus size={14} />Əlavə et</>}</button>
-                {doc && <button className="action-btn action-btn-danger" onClick={() => removeSection('explanation', doc)}><Trash2 size={14} />Sil</button>}
-              </div>
-            </div>
-            {doc ? <Reader key={doc.id} doc={doc} label="İzahlı material" /> : (
-              <Missing icon={BookOpen} title="İzahlı material əlavə edilməyib" text="Normativ aktın izahını Word və ya PDF faylı kimi əlavə edin."
-                action={<button className="btn primary small" onClick={() => openDialog('explanation')}><Plus size={14} />İzah əlavə et</button>} />
-            )}
-          </section>
-        )}
+        {current === 'izah' && (doc
+          ? <Reader key={doc.id} doc={doc} label="İzahlı material" fileSlot={picker} actions={docActions('explanation')} />
+          : <Missing icon={BookOpen} title="İzahlı material əlavə edilməyib" text="Normativ aktın izahını Word və ya PDF faylı kimi əlavə edin. Word faylı avtomatik PDF-ə çevrilir."
+            action={<button className="btn primary small" onClick={() => openDialog('explanation')}><Plus size={14} />İzah əlavə et</button>} />)}
 
         {current === 'test' && (
-          <section className="tab-body">
-            <div className="section-bar">
-              <div className="doc-chips">
-                {lesson.tests?.source && <span className="doc-chip on static"><span className="ftype word">{extOf(lesson.tests.source.name).toUpperCase()}</span><span className="doc-chip-name">{lesson.tests.source.name.replace(/\.[^.]+$/, '')}</span></span>}
-              </div>
-              <div className="section-actions">
-                <button className="action-btn" onClick={() => openDialog('tests', lesson.tests)}>{lesson.tests ? <><Replace size={14} />Dəyişdir</> : <><Plus size={14} />Əlavə et</>}</button>
-                {lesson.tests?.source && <button className="action-btn" onClick={downloadSource} disabled={downloading}>{downloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}Word faylı</button>}
-                {lesson.tests && <button className="action-btn action-btn-danger" onClick={() => removeSection('tests', lesson.tests?.source)}><Trash2 size={14} />Sil</button>}
-              </div>
+          <div className="test-page">
+            <div className="test-bar">
+              {lesson.tests?.source
+                ? <span className="vfile-one" title={lesson.tests.source.name}><FileTag name={lesson.tests.source.name} /><em>{lesson.tests.count} sual</em></span>
+                : <span className="test-bar-title">Test paketi</span>}
+              <span className="vbar-grow" />
+              {lesson.tests?.source && <button className="vb" onClick={downloadSource} disabled={downloading} title="Word faylını endir">{downloading ? <Loader2 size={16} className="spin" /> : <Download size={16} />}</button>}
+              {lesson.tests && <button className="vb" onClick={() => openDialog('tests', lesson.tests)} title="Test bankını dəyişdir"><RefreshCw size={16} /></button>}
+              {lesson.tests && <button className="vb danger" onClick={() => removeSection('tests', lesson.tests?.source)} title="Test bankını sil"><Trash2 size={16} /></button>}
+              {!lesson.tests && <button className="vadd" onClick={() => openDialog('tests')}><Plus size={15} />Test bankı</button>}
             </div>
             {lesson.tests ? (
               <TestPanel key={`${lesson.id}:${lesson.tests.updatedAt}`} type="lesson" id={lesson.id} name={lesson.title} tests={lesson.tests} user={user}
@@ -194,9 +134,8 @@ export default function LessonPage(props) {
               <Missing icon={ListChecks} title="Test bankı əlavə edilməyib" text="Word test bankını əlavə edin: suallar avtomatik oxunur və burada interaktiv işlənir."
                 action={<button className="btn primary small" onClick={() => openDialog('tests')}><Plus size={14} />Test bankı əlavə et</button>} />
             )}
-          </section>
+          </div>
         )}
-      </div>
       </Workspace>
 
       {dialog && <AddDialog kind="section" edit={dialog} catalog={catalog} onClose={() => setDialog(null)}
@@ -205,13 +144,18 @@ export default function LessonPage(props) {
   );
 }
 
+export function FileTag({ name }) {
+  const ext = extOf(name);
+  return <><span className={`ftype ${ext === 'pdf' ? 'pdf' : 'word'}`}>{ext === 'pdf' ? 'PDF' : ext.toUpperCase()}</span><b>{name.replace(/\.[^.]+$/, '')}</b></>;
+}
+
 export function Missing({ icon: Icon, title, text, action }) {
   return (
-    <div className="ga-card ga-empty">
+    <div className="missing"><div className="ga-card ga-empty">
       <Icon size={26} />
       <strong>{title}</strong>
       <span>{text}</span>
       {action}
-    </div>
+    </div></div>
   );
 }

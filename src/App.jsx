@@ -28,7 +28,11 @@ export default function App() {
   const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    const on = () => { setRoute(parseHash()); };
+    const on = () => {
+      setRoute(parseHash());
+      const h = decodeURIComponent(location.hash.replace(/^#/, ''));
+      if (/^\/(ders|sinaq)\//.test(h)) { try { localStorage.setItem('ga.last', h); } catch { /* private mode */ } }
+    };
     window.addEventListener('hashchange', on);
     return () => window.removeEventListener('hashchange', on);
   }, []);
@@ -71,6 +75,16 @@ export default function App() {
   if (!user) return <Login onLogin={u => { setUser(u); toast(`Xoş gəldiniz, ${u.name}`); }} />;
 
   const common = { user, catalog, reload, logout, loadError };
+
+  // there is no separate main page: open the last lesson or exam, else the first lesson
+  if (route.page === 'home' && catalog) {
+    let last = null;
+    try { last = localStorage.getItem('ga.last'); } catch { /* private mode */ }
+    const ok = last && ((last.startsWith('/ders/') && catalog.lessons.some(l => last.startsWith(`/ders/${l.id}`)))
+      || (last.startsWith('/sinaq/') && catalog.exams.some(e => last === `/sinaq/${e.id}`)));
+    const target = ok ? last : catalog.lessons[0] ? `/ders/${catalog.lessons[0].id}` : null;
+    if (target) { location.replace(`#${target}`); return null; }
+  }
   let page;
   if (route.page === 'lesson') page = <LessonPage key={route.id} {...common} id={route.id} tab={route.tab} />;
   else if (route.page === 'exam') page = <ExamPage key={route.id} {...common} id={route.id} />;
