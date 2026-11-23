@@ -108,24 +108,19 @@ export default function LessonPage(props) {
 
   return (
     <>
-      <Workspace {...props} active={{ type: 'lesson', id: lesson.id, tab: current }} crumb={`Dərs ${index + 1}`}>
+      <Workspace {...props} active={{ type: 'lesson', id: lesson.id, tab: current }}
+        title={lesson.title}
+        subtitle={`Dərs ${index + 1} / ${catalog.lessons.length} · ${TABS.find(t => t.key === current)?.label || ''}`}
+        tools={<>
+          <button className="tb-tool" title="Əvvəlki dərs" disabled={!prev} onClick={() => prev && go(`/ders/${prev.id}`)}><ChevronLeft size={15} /></button>
+          <button className="tb-tool" title="Növbəti dərs" disabled={!next} onClick={() => next && go(`/ders/${next.id}`)}><ChevronRight size={15} /></button>
+          <span className="tool-sep" />
+          <button className="tb-tool" title="Adını dəyiş" onClick={rename}><Pencil size={14} /></button>
+          <button className="tb-tool danger" title="Dərsi sil" onClick={removeLesson}><Trash2 size={14} /></button>
+        </>}>
       <div className="ws-page">
-        <header className="lesson-head">
-          <span className="lesson-no">{index + 1}</span>
-          <div className="lesson-title">
-            <span className="lesson-kicker">Dərs {index + 1} / {catalog.lessons.length}</span>
-            <h1>{lesson.title}</h1>
-          </div>
-          <div className="lesson-tools">
-            <button className="group-act-btn" title="Əvvəlki dərs" disabled={!prev} onClick={() => prev && go(`/ders/${prev.id}`)}><ChevronLeft size={15} /></button>
-            <button className="group-act-btn" title="Növbəti dərs" disabled={!next} onClick={() => next && go(`/ders/${next.id}`)}><ChevronRight size={15} /></button>
-            <span className="tool-sep" />
-            <button className="group-act-btn" title="Adını dəyiş" onClick={rename}><Pencil size={14} /></button>
-            <button className="group-act-btn danger" title="Dərsi sil" onClick={removeLesson}><Trash2 size={14} /></button>
-          </div>
-        </header>
 
-        <nav className="tabs" role="tablist">
+        <nav className="tabs ws-tabs" role="tablist">
           {TABS.map(t => {
             const Icon = t.icon;
             return (

@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import {
   Search, Plus, FolderUp, GripVertical, Pencil, Trash2, FileText, BookOpen, ListChecks,
-  GraduationCap, Timer, ChevronRight, Loader2, PlayCircle, Library
+  ChevronRight, Loader2, PlayCircle, Library
 } from 'lucide-react';
 import Topbar from './Topbar.jsx';
 import AddDialog from './AddDialog.jsx';
@@ -170,30 +170,6 @@ export default function Home(props) {
               </div>
             </section>
 
-            <section className="group-card open">
-              <div className="group-head static">
-                <span className="group-folder"><GraduationCap size={18} /></span>
-                <span className="group-name">Yekun sınaqlar</span>
-                <span className="group-count">{catalog.exams.filter(e => e.tests).length} / {catalog.exams.length}</span>
-              </div>
-              <div className="group-body">
-                {catalog.exams.map((ex, i) => (
-                  <button key={ex.id} className={`process-item exam-row ${ex.tests ? '' : 'is-empty'}`} onClick={() => go(`/sinaq/${ex.id}`)}>
-                    <span className="num">{i + 1}</span>
-                    <span className="label">
-                      {ex.title}
-                      <span className="row-meta">
-                        {ex.tests
-                          ? <span className="meta-chip"><ListChecks size={13} />{ex.tests.count} sual</span>
-                          : <span className="meta-chip muted">Test bankı əlavə edilməyib</span>}
-                        {ex.timeLimitMin > 0 && <span className="meta-chip"><Timer size={13} />{ex.timeLimitMin} dəq</span>}
-                      </span>
-                    </span>
-                    <ChevronRight size={17} className="row-arrow" />
-                  </button>
-                ))}
-              </div>
-            </section>
           </div>
         )}
       </div>

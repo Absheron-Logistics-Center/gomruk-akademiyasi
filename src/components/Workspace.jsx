@@ -2,10 +2,7 @@
 // moves to the left side, the open lesson fills the right side (like V1.5).
 // On a phone the list opens from the menu button in the top bar.
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Search, Plus, FolderUp, GripVertical, Pencil, Trash2, ChevronRight, FileText, BookOpen, ListChecks,
-  GraduationCap, Library, X, Home as HomeIcon
-} from 'lucide-react';
+import { Search, Plus, FolderUp, Pencil, Trash2, ChevronRight, FileText, BookOpen, ListChecks, X, Home as HomeIcon } from 'lucide-react';
 import Topbar from './Topbar.jsx';
 import AddDialog from './AddDialog.jsx';
 import FolderImport from './FolderImport.jsx';
@@ -22,7 +19,7 @@ const SUBS = [
 ];
 
 // active: { type: 'lesson'|'exam', id, tab }
-export default function Workspace({ active, crumb, children, ...props }) {
+export default function Workspace({ active, title, subtitle, tools, children, ...props }) {
   const { catalog, reload, user } = props;
   const { toast, confirm, prompt } = useUi();
   const [query, setQuery] = useState('');
@@ -77,6 +74,35 @@ export default function Workspace({ active, crumb, children, ...props }) {
     } catch (e) { toast(e.message, 'error'); }
   }
 
+  /* final exams: add, rename, delete */
+  async function addExam() {
+    const n = (catalog?.exams || []).length + 1;
+    const title = await prompt({ title: 'Yeni yekun sınaq', label: 'Sınağın adı', value: `Yekun sınaq ${n}`, confirmLabel: 'Əlavə et' });
+    if (!title) return;
+    try { const ex = await api.addExam(title); await reload(); toast(`"${title}" əlavə edildi.`); go(`/sinaq/${ex.id}`); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+  async function renameExam(ex) {
+    const title = await prompt({ title: 'Sınağın adını dəyiş', label: 'Ad', value: ex.title });
+    if (!title || title === ex.title) return;
+    try { await api.saveExam(ex.id, { title }); await reload(); toast('Ad dəyişdirildi.'); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+  async function removeExam(ex) {
+    const ok = await confirm({
+      title: `"${ex.title}" silinsin?`, danger: true, confirmLabel: 'Sınağı sil',
+      text: `${ex.tests ? 'Bu sınaq və onun test bankı' : 'Bu sınaq'} silinəcək. Silinmə hamı üçündür və geri qaytarılmır.`
+    });
+    if (!ok) return;
+    try {
+      await api.deleteExam(ex.id);
+      dropSession(user?.username, `exam:${ex.id}`);
+      await reload();
+      toast('Sınaq silindi.');
+      if (active?.type === 'exam' && active.id === ex.id) go('/');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
   /* drag to reorder (same as on the main page) */
   function onDragStart(e, id) {
     if (query.trim()) { e.preventDefault(); toast('Sıranı dəyişmək üçün əvvəlcə axtarışı təmizləyin.'); return; }
@@ -105,7 +131,8 @@ export default function Workspace({ active, crumb, children, ...props }) {
 
   return (
     <>
-      <Topbar {...props} back={() => go('/')} backLabel="Əsas səhifə" crumb={crumb} onMenu={() => setDrawer(true)} />
+      <Topbar {...props} onMenu={() => setDrawer(true)}
+        title={title} subtitle={subtitle} tools={tools} />
       <div className="workspace">
         {drawer && <div className="ws-scrim" onClick={() => setDrawer(false)} />}
         <aside className={`ws-side ${drawer ? 'show' : ''}`} aria-label="Dərslər">
@@ -119,12 +146,12 @@ export default function Workspace({ active, crumb, children, ...props }) {
             {query && <button onClick={() => setQuery('')} aria-label="Təmizlə"><X size={13} /></button>}
           </div>
           <div className="ws-actions">
-            <button className="btn primary small" onClick={() => setAdding(true)}><Plus size={14} />Dərs əlavə et</button>
-            <button className="btn small" onClick={() => setFolderOpen(true)} title="Qovluqdan yüklə"><FolderUp size={14} />Qovluq</button>
+            <button className="ws-add" onClick={() => setAdding(true)}><Plus size={15} />Dərs əlavə et</button>
+            <button className="ws-folder" onClick={() => setFolderOpen(true)} title="Qovluqdan yüklə"><FolderUp size={15} /></button>
           </div>
 
           <div className="ws-scroll">
-            <div className="ws-section"><Library size={14} />Dərslər<span className="group-count">{lessons.length}</span></div>
+            <div className="ws-section"><span>Dərslər</span><em>{lessons.length}</em></div>
             <div className="ws-list" onDragOver={e => drag && e.preventDefault()} onDrop={onDrop}>
               {visible.map(l => {
                 const isActive = active?.type === 'lesson' && active.id === l.id;
@@ -133,29 +160,29 @@ export default function Workspace({ active, crumb, children, ...props }) {
                 return (
                   <div key={l.id} className={`ws-lesson ${isActive ? 'active' : ''} ${drag?.id === l.id ? 'dragging' : ''} ${mark}`}
                     draggable onDragStart={e => onDragStart(e, l.id)} onDragOver={e => onDragOver(e, l.id)} onDragEnd={() => setDrag(null)}>
-                    <div className="ws-lesson-row">
-                      <span className="ws-grip" title="Sürüşdürərək yerini dəyişin"><GripVertical size={14} /></span>
-                      <button className="ws-lesson-main" onClick={() => go(`/ders/${l.id}`)} title={l.title}>
-                        <span className="ws-no">{l.number}</span>
-                        <span className="ws-title">{l.title}</span>
+                    <div className="ws-row">
+                      <button className="ws-open" onClick={() => go(`/ders/${l.id}`)} title={l.title}>
+                        <span className="ws-num">{l.number}</span>
+                        <span className="ws-name">{l.title}</span>
                       </button>
                       <span className="ws-tools">
                         <button title="Adını dəyiş" onClick={() => rename(l)}><Pencil size={13} /></button>
                         <button className="danger" title={`Dərs ${l.number}-i sil`} onClick={() => remove(l)}><Trash2 size={13} /></button>
+                        {!isActive && (
+                          <button className={`ws-chev ${unfolded ? 'open' : ''}`} onClick={() => toggle(l.id)} aria-expanded={unfolded} title="Bölmələr">
+                            <ChevronRight size={14} />
+                          </button>
+                        )}
                       </span>
-                      <button className={`ws-chev ${unfolded ? 'open' : ''}`} onClick={() => toggle(l.id)} aria-expanded={unfolded} aria-label="Bölmələri aç">
-                        <ChevronRight size={15} />
-                      </button>
                     </div>
                     {unfolded && (
                       <div className="ws-subs">
                         {SUBS.map(s => {
-                          const Icon = s.icon;
                           const n = s.count(l);
                           const on = isActive && (active.tab || 'original') === s.tab;
                           return (
                             <button key={s.tab} className={`ws-sub ${on ? 'on' : ''} ${n ? '' : 'empty'}`} onClick={() => go(`/ders/${l.id}/${s.tab}`)}>
-                              <Icon size={13} /><span>{s.label}</span>{n > 0 && <em>{n}</em>}
+                              <span>{s.label}</span><em>{n || ''}</em>
                             </button>
                           );
                         })}
@@ -167,14 +194,29 @@ export default function Workspace({ active, crumb, children, ...props }) {
               {!visible.length && <div className="ws-none">{query ? 'Axtarışa uyğun dərs yoxdur.' : 'Hələ dərs yoxdur.'}</div>}
             </div>
 
-            <div className="ws-section"><GraduationCap size={14} />Yekun sınaqlar<span className="group-count">{(catalog?.exams || []).filter(e => e.tests).length}/{(catalog?.exams || []).length}</span></div>
+            <div className="ws-section"><span>Yekun sınaqlar</span><em>{(catalog?.exams || []).filter(e => e.tests).length} / {(catalog?.exams || []).length}</em>
+              <button className="ws-section-add" onClick={addExam} title="Yeni yekun sınaq"><Plus size={14} /></button>
+            </div>
             <div className="ws-list">
-              {(catalog?.exams || []).map((ex, i) => (
-                <button key={ex.id} className={`ws-exam ${active?.type === 'exam' && active.id === ex.id ? 'active' : ''} ${ex.tests ? '' : 'empty'}`} onClick={() => go(`/sinaq/${ex.id}`)}>
-                  <span className="ws-no">{i + 1}</span>
-                  <span className="ws-title">{ex.title}</span>
-                  <em>{ex.tests ? `${ex.tests.count} sual` : 'boş'}</em>
-                </button>
+              {(catalog?.exams || []).map((ex, i) => {
+                const on = active?.type === 'exam' && active.id === ex.id;
+                return (
+                  <div key={ex.id} className={`ws-lesson ws-exam-item ${on ? 'active' : ''} ${ex.tests ? '' : 'empty'}`}>
+                    <div className="ws-row">
+                      <button className="ws-open" onClick={() => go(`/sinaq/${ex.id}`)} title={ex.title}>
+                        <span className="ws-num">{i + 1}</span>
+                        <span className="ws-name">{ex.title}</span>
+                        <em className="ws-meta">{ex.tests ? `${ex.tests.count} sual` : ''}</em>
+                      </button>
+                      <span className="ws-tools">
+                        <button title="Adını dəyiş" onClick={() => renameExam(ex)}><Pencil size={13} /></button>
+                        <button className="danger" title="Sınağı sil" onClick={() => removeExam(ex)}><Trash2 size={13} /></button>
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+              {!(catalog?.exams || []).length && <button className="ws-none ws-add-exam" onClick={addExam}>Yekun sınaq əlavə et</button>}
               ))}
             </div>
           </div>

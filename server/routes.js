@@ -10,7 +10,7 @@ const CATALOG = 'catalog';
 const TESTS = id => `tests/${id}`;
 const PART = 3 * 1024 * 1024;
 const MAX_FILE = 95 * 1024 * 1024;
-const EXAMS = 4;
+const EXAMS = 4;           // final exams a new site starts with; more can be added, any can be deleted
 
 const DOC_EXT = new Set(['pdf', 'doc', 'docx', 'docm', 'dot', 'dotx', 'dotm', 'rtf', 'odt', 'ott', 'xml', 'txt']);
 const MIME = {
@@ -36,16 +36,19 @@ const extOf = n => (String(n || '').split('.').pop() || '').toLowerCase();
 function blankExams() {
   return Array.from({ length: EXAMS }, (_, i) => ({ id: `exam-${i + 1}`, title: `Yekun sınaq ${i + 1}`, tests: null, timeLimitMin: 0 }));
 }
+// before the list of exams was ever changed it holds the 4 starting ones
+const examsOf = (c) => (Array.isArray(c.exams) && c.examsEdited ? c.exams
+  : blankExams().map(e => ({ ...e, ...((c.exams || []).find(x => x.id === e.id) || {}) })));
 async function readCatalog() {
   const c = (await getJson(CATALOG))?.content || {};
-  const exams = blankExams().map(e => ({ ...e, ...((c.exams || []).find(x => x.id === e.id) || {}) }));
-  return { lessons: Array.isArray(c.lessons) ? c.lessons : [], exams, updatedAt: c.updatedAt || null };
+  return { lessons: Array.isArray(c.lessons) ? c.lessons : [], exams: examsOf(c), updatedAt: c.updatedAt || null };
 }
 // read, change and write the catalog without losing a change made at the same moment
 async function updateCatalog(fn) {
   return updateJson(CATALOG, () => ({ lessons: [], exams: [] }), async (c) => {
     c.lessons = Array.isArray(c.lessons) ? c.lessons : [];
-    c.exams = blankExams().map(e => ({ ...e, ...((c.exams || []).find(x => x.id === e.id) || {}) }));
+    c.exams = examsOf(c);
+    c.examsEdited = true;
     const out = (await fn(c)) || c;
     out.updatedAt = new Date().toISOString();
     return out;
@@ -105,6 +108,28 @@ router.put('/lessons/:id', wrap(async (req, res) => {
     out = l;
   });
   res.json(out);
+}));
+
+router.post('/exams', wrap(async (req, res) => {
+  let made;
+  await updateCatalog(c => {
+    const title = String(req.body?.title || '').trim().slice(0, 120) || `Yekun sınaq ${c.exams.length + 1}`;
+    made = { id: uid('e'), title, tests: null, timeLimitMin: Math.max(0, Math.min(600, Number(req.body?.timeLimitMin) || 0)), createdAt: new Date().toISOString(), createdBy: who(req) };
+    c.exams.push(made);
+  });
+  res.status(201).json(made);
+}));
+
+router.delete('/exams/:id', wrap(async (req, res) => {
+  let gone;
+  await updateCatalog(c => {
+    const i = c.exams.findIndex(x => x.id === req.params.id);
+    if (i < 0) throw err(404, 'Sınaq tapılmadı.');
+    gone = c.exams.splice(i, 1)[0];
+  });
+  if (gone.tests?.source) await dropDoc(gone.tests.source);
+  if (gone.tests) await deleteJson(TESTS(gone.id)).catch(() => {});
+  res.json({ ok: true });
 }));
 
 router.put('/exams/:id', wrap(async (req, res) => {

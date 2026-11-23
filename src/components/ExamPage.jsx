@@ -39,6 +39,12 @@ export default function ExamPage(props) {
     try { await api.saveExam(exam.id, { title }); await reload(); toast('Ad dəyişdirildi.'); }
     catch (e) { toast(e.message, 'error'); }
   }
+  async function removeExam() {
+    const ok = await confirm({ title: `"${exam.title}" silinsin?`, danger: true, confirmLabel: 'Sınağı sil', text: `${exam.tests ? 'Bu sınaq və onun test bankı' : 'Bu sınaq'} silinəcək. Silinmə hamı üçündür və geri qaytarılmır.` });
+    if (!ok) return;
+    try { await api.deleteExam(exam.id); dropSession(user?.username, `exam:${exam.id}`); await reload(); toast('Sınaq silindi.'); go('/'); }
+    catch (e) { toast(e.message, 'error'); }
+  }
   async function setLimit() {
     const v = await prompt({ title: 'Sınağın vaxtı', label: 'Dəqiqə (0 = vaxt göstərilmir)', value: exam.timeLimitMin || 0, type: 'number', min: 0, max: 600 });
     if (v === null || v === undefined) return;
@@ -64,21 +70,17 @@ export default function ExamPage(props) {
 
   return (
     <>
-      <Workspace {...props} active={{ type: 'exam', id: exam.id }} crumb="Yekun sınaqlar">
+      <Workspace {...props} active={{ type: 'exam', id: exam.id }}
+        title={exam.title}
+        subtitle={`Yekun sınaq ${index + 1} / ${catalog.exams.length}`}
+        tools={<>
+          <button className="tb-tool" title="Əvvəlki sınaq" disabled={!prev} onClick={() => prev && go(`/sinaq/${prev.id}`)}><ChevronLeft size={15} /></button>
+          <button className="tb-tool" title="Növbəti sınaq" disabled={!next} onClick={() => next && go(`/sinaq/${next.id}`)}><ChevronRight size={15} /></button>
+          <span className="tool-sep" />
+          <button className="tb-tool" title="Adını dəyiş" onClick={rename}><Pencil size={14} /></button>
+          <button className="tb-tool danger" title="Sınağı sil" onClick={removeExam}><Trash2 size={14} /></button>
+        </>}>
       <div className="ws-page">
-        <header className="lesson-head">
-          <span className="lesson-no exam"><GraduationCap size={20} /></span>
-          <div className="lesson-title">
-            <span className="lesson-kicker">Yekun sınaq {index + 1} / {catalog.exams.length}</span>
-            <h1>{exam.title}</h1>
-          </div>
-          <div className="lesson-tools">
-            <button className="group-act-btn" title="Əvvəlki sınaq" disabled={!prev} onClick={() => prev && go(`/sinaq/${prev.id}`)}><ChevronLeft size={15} /></button>
-            <button className="group-act-btn" title="Növbəti sınaq" disabled={!next} onClick={() => next && go(`/sinaq/${next.id}`)}><ChevronRight size={15} /></button>
-            <span className="tool-sep" />
-            <button className="group-act-btn" title="Adını dəyiş" onClick={rename}><Pencil size={14} /></button>
-          </div>
-        </header>
 
         <section className="tab-body">
           <div className="section-bar">

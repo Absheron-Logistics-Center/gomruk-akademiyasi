@@ -44,12 +44,33 @@ function stylesheet(){return `<!doctype html><html lang="az"><head><meta charset
 async function fromDocx(file){
  if(!file||!/\.(docx|docm|dotx|dotm)$/i.test(file.name))throw Error('Seçilmiş fayl DOCX/ DOCM/ DOTX/ DOTM formatında deyil');
  const za=await readZip(file, {maxBytes:100*1024*1024,maxOutput:260*1024*1024});
- const word=await za.text('word/document.xml');if(!word)throw Error('Bu fayl etibarlı .docx Word sənədi deyil');
- const root=xml(word,'Word'),body=root.getElementsByTagNameNS(W,'body')[0];if(!body)throw Error('Word sənədinin əsas mətni yoxdur');
- const numbers=numMaps((await za.text('word/numbering.xml'))||'');const rels=new Map();
- const relsrc=await za.text('word/_rels/document.xml.rels');if(relsrc){const d=xml(relsrc,'Word əlaqələri');for(const r of d.getElementsByTagName('Relationship')){if(r.getAttribute('TargetMode')==='External')continue;const id=r.getAttribute('Id'),target=r.getAttribute('Target');if(id&&target&&!target.includes('..')&&!target.startsWith('/')&&!target.includes(':'))rels.set(id,'word/'+target.replace(/^\.\//,''))}}
+ // Word "Strict Open XML" files use other names for the same things: read them as the usual kind
+ const STRICT=[['http://purl.oclc.org/ooxml/wordprocessingml/main',W],['http://purl.oclc.org/ooxml/officeDocument/relationships',R],['http://purl.oclc.org/ooxml/drawingml/main',A],['http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing',WP]];
+ const norm=t=>{if(!t)return t;for(const [a,b] of STRICT)t=t.split(a).join(b);return t};
+ const ztext=async p=>norm(await za.text(p));
+ // the main text is usually word/document.xml, but the package itself says where it is
+ let main='word/document.xml';
+ try{const top=await za.text('_rels/.rels');if(top){const d=xml(top,'Word paketi');for(const r of d.getElementsByTagName('Relationship')){if(/\/officeDocument$/.test(r.getAttribute('Type')||'')){const t=(r.getAttribute('Target')||'').replace(/^\//,'');if(t&&!t.includes('..'))main=t}}}}catch(_e){}
+ const dir=main.includes('/')?main.slice(0,main.lastIndexOf('/')+1):'';
+ let word=await ztext(main);if(!word&&main!=='word/document.xml'){main='word/document.xml';word=await ztext(main)}
+ if(!word){const any=(za.list()).find(n=>/^word\/document[^/]*\.xml$/i.test(n));if(any){main=any;word=await ztext(any)}}
+ if(!word)throw Error('Bu fayl etibarlı .docx Word sənədi deyil');
+ const root=xml(word,'Word');let body=root.getElementsByTagNameNS(W,'body')[0];
+ if(!body){
+  // an unusual Word file: keep at least its text, paragraph by paragraph
+  const lines=[];for(const p of Array.from(root.getElementsByTagName('*')).filter(e=>e.localName==='p')){const t=Array.from(p.getElementsByTagName('*')).filter(e=>e.localName==='t').map(e=>e.textContent).join('').trim();if(t)lines.push({text:t,red:false})}
+  if(!lines.length)throw Error('Word sənədinin əsas mətni yoxdur');
+  const html=stylesheet()+'<div class="docpage" id="page=1">'+lines.map(l=>'<p>'+esc(l.text)+'</p>').join('')+'</div></body></html>';
+  return {html,index:[{page:1,text:lines.map(l=>l.text).join('\n').slice(0,1200000)}],lines,count:lines.length,filename:file.name};
+ }
+ const relPath=dir+'_rels/'+main.slice(dir.length)+'.rels';
+ const relsrc=await ztext(relPath);
+ let numPath='word/numbering.xml';
+ if(relsrc){try{const d=xml(relsrc,'Word əlaqələri');for(const r of d.getElementsByTagName('Relationship')){if(/\/numbering$/.test(r.getAttribute('Type')||''))numPath=dir+(r.getAttribute('Target')||'').replace(/^\.\//,'')}}catch(_e){}}
+ const numbers=numMaps((await ztext(numPath))||'');const rels=new Map();
+ if(relsrc){const d=xml(relsrc,'Word əlaqələri');for(const r of d.getElementsByTagName('Relationship')){if(r.getAttribute('TargetMode')==='External')continue;const id=r.getAttribute('Id'),target=r.getAttribute('Target');if(id&&target&&!target.includes('..')&&!target.startsWith('/')&&!target.includes(':'))rels.set(id,dir+target.replace(/^\.\//,''))}}
  const mediaCache=new Map();let mediaTotal=0;
- async function imageFor(node){const blip=node.getElementsByTagNameNS(A,'blip')[0];if(!blip)return '';const id=blip.getAttributeNS(R,'embed');let path=rels.get(id);if(!path||!/^word\/(media|embeddings)\//.test(path))return '';const ext=path.split('.').pop().toLowerCase();const mime={png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',bmp:'image/bmp'}[ext];if(!mime)return '';if(mediaCache.has(path))return mediaCache.get(path);const b=await za.bytes(path);if(!b||b.length>8*1024*1024||mediaTotal+b.length>22*1024*1024)return '';mediaTotal+=b.length;const blocks=[];for(let i=0;i<b.length;i+=8192)blocks.push(String.fromCharCode(...b.subarray(i,i+8192)));const src=`data:${mime};base64,${btoa(blocks.join(''))}`;mediaCache.set(path,src);return src}
+ async function imageFor(node){const blip=node.getElementsByTagNameNS(A,'blip')[0];if(!blip)return '';const id=blip.getAttributeNS(R,'embed');let path=rels.get(id);if(!path||!/(^|\/)(media|embeddings)\//.test(path))return '';const ext=path.split('.').pop().toLowerCase();const mime={png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',bmp:'image/bmp'}[ext];if(!mime)return '';if(mediaCache.has(path))return mediaCache.get(path);const b=await za.bytes(path);if(!b||b.length>8*1024*1024||mediaTotal+b.length>22*1024*1024)return '';mediaTotal+=b.length;const blocks=[];for(let i=0;i<b.length;i+=8192)blocks.push(String.fromCharCode(...b.subarray(i,i+8192)));const src=`data:${mime};base64,${btoa(blocks.join(''))}`;mediaCache.set(path,src);return src}
  async function toParagraph(p){let str='',raw='',parts=[];const num=numbers.prefix(p);if(num){str+=esc(num);raw+=num}for(const part of textParts(p)){let t=part.text;raw+=t;parts.push({text:t,red:part.red});let h=esc(t).replace(/\n/g,'<br>').replace(/\f/g,'<hr style="border:0;border-top:1px dashed #a0b4bf">');const pr=child(part.node,'rPr');if(child(pr,'b'))h=`<strong>${h}</strong>`;if(child(pr,'i'))h=`<em>${h}</em>`;if(child(pr,'u'))h=`<u>${h}</u>`;if(child(pr,'vertAlign')&&val(child(pr,'vertAlign'))==='superscript')h=`<sup>${h}</sup>`;if(child(pr,'vertAlign')&&val(child(pr,'vertAlign'))==='subscript')h=`<sub>${h}</sub>`;const col=val(child(pr,'color'));if(/^[a-fA-F0-9]{6}$/.test(col)&&(parseInt(col.slice(0,2),16)*299+parseInt(col.slice(2,4),16)*587+parseInt(col.slice(4,6),16)*114)/1000<215)h=`<span style="color:#${col}">${h}</span>`;const highlight=val(child(pr,'highlight'));if(/^(yellow|green|cyan|magenta|red|blue|gray)$/i.test(highlight))h=`<span style="background-color:${highlight}">${h}</span>`;const sz=Number(val(child(pr,'sz')));if(sz>=12&&sz<=120)h=`<span style="font-size:${sz/2}pt">${h}</span>`;str+=h;for(const d of Array.from(part.node.getElementsByTagNameNS(W,'drawing'))) {const src=await imageFor(d);if(src)str+=`<img loading="lazy" alt="Word sənədində şəkil" src="${src}">`}}
  const ps=val(child(child(p,'pPr'),'pStyle'));const k=q(ps).replace(/ /g,'');const tag=/^(TITLE|BASL1|HEADING1|HEADING2|HEADING3|BASL2|BASL3)/.test(k)?(/(3)$/.test(k)?'h3':/(2)$/.test(k)?'h2':'h1'):'p';const clean=raw.replace(/\f/g,'\n');const redCount=parts.reduce((a,r)=>a+(r.red?r.text.length:0),0);const printable=parts.reduce((a,r)=>a+r.text.length,0);const red=(redCount>0&&redCount/Math.max(1,printable)>=.38);return {html:`<${tag}>${str||'&nbsp;'}</${tag}>`,text:clean,red,parts};
  }

@@ -96,7 +96,7 @@ function PdfView({ blob, doc, onFull, extra, fromWord }) {
   const [fit, setFit] = useState(true);
   const frame = useRef(null);
 
-  const frag = fit ? `#page=${page}&view=FitH` : `#page=${page}&zoom=${zoom}`;
+  const frag = (fit ? `#page=${page}&view=FitH` : `#page=${page}&zoom=${zoom}`) + '&pagemode=none&navpanes=0';
   const src = url ? `${url}${frag}` : 'about:blank';
   // the viewer reads the part after # when the address changes
   useEffect(() => { if (frame.current && url && frame.current.src !== src) frame.current.src = src; }, [src, url]);

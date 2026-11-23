@@ -19,7 +19,6 @@ function parseHash() {
   return { page: 'home' };
 }
 
-const FONT_KEY = 'ga_font';
 
 export default function App() {
   const { toast } = useUi();
@@ -27,7 +26,6 @@ export default function App() {
   const [route, setRoute] = useState(parseHash);
   const [catalog, setCatalog] = useState(null);
   const [loadError, setLoadError] = useState('');
-  const [font, setFont] = useState(() => { try { return Number(localStorage.getItem(FONT_KEY)) || 100; } catch { return 100; } });
 
   useEffect(() => {
     const on = () => { setRoute(parseHash()); };
@@ -35,10 +33,6 @@ export default function App() {
     return () => window.removeEventListener('hashchange', on);
   }, []);
 
-  useEffect(() => {
-    document.documentElement.style.setProperty('--font-scale', String(font / 100));
-    try { localStorage.setItem(FONT_KEY, String(font)); } catch { /* ignore */ }
-  }, [font]);
 
   const logout = useCallback(() => { clearSession(); setUser(null); setCatalog(null); go('/'); }, []);
   useEffect(() => { setOnExpired(() => { clearSession(); setUser(null); }); }, []);
@@ -76,7 +70,7 @@ export default function App() {
 
   if (!user) return <Login onLogin={u => { setUser(u); toast(`Xoş gəldiniz, ${u.name}`); }} />;
 
-  const common = { user, catalog, reload, logout, font, setFont, loadError };
+  const common = { user, catalog, reload, logout, loadError };
   let page;
   if (route.page === 'lesson') page = <LessonPage key={route.id} {...common} id={route.id} tab={route.tab} />;
   else if (route.page === 'exam') page = <ExamPage key={route.id} {...common} id={route.id} />;

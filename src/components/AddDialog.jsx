@@ -141,7 +141,7 @@ export default function AddDialog({ kind, edit, catalog, onClose, onDone }) {
             <div className="seg">
               <button type="button" className={target === 'lesson' ? 'on' : ''} onClick={() => setTarget('lesson')} disabled={busy}>Adi dərs</button>
               {(catalog?.exams || []).map((e, i) => (
-                <button type="button" key={e.id} className={target === e.id ? 'on' : ''} onClick={() => setTarget(e.id)} disabled={busy}>Yekun sınaq {i + 1}</button>
+                <button type="button" key={e.id} className={target === e.id ? 'on' : ''} onClick={() => setTarget(e.id)} disabled={busy}>{e.title}</button>
               ))}
             </div>
           </div>
