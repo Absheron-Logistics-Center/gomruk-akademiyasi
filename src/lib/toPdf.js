@@ -73,12 +73,39 @@ function fitToPage(node) {
     node.margin = node.margin || [0, 4, 0, 6];
   }
   if (node.table) {
-    const cols = (node.table.body?.[0] || []).reduce((a, c) => a + (c?.colSpan || 1), 0);
+    // Word tables are often uneven (merged cells, short rows): make every row as long as
+    // the longest one, keep spans inside the table, one width per column
+    const body = (node.table.body || []).filter(Array.isArray).map(r => r.map(c => (c == null ? { text: '' } : c)));
+    const cols = Math.max(0, ...body.map(r => r.length));
+    if (!cols) { delete node.table; node.text = ''; return; }
+    body.forEach((row, y) => {
+      while (row.length < cols) row.push({ text: '' });
+      row.forEach((c, x) => {
+        if (typeof c !== 'object') return;
+        if (c.colSpan > 1 && x + c.colSpan > cols) c.colSpan = cols - x;
+        if (c.rowSpan > 1 && y + c.rowSpan > body.length) c.rowSpan = body.length - y;
+      });
+    });
+    node.table.body = body;
     const w = node.table.widths;
-    if (cols && (!Array.isArray(w) || w.length !== cols || w.every(x => x === 'auto'))) node.table.widths = Array(cols).fill('*');
-    node.table.body?.forEach(row => row.forEach(fitToPage));
+    if (!Array.isArray(w) || w.length !== cols || w.every(x => x === 'auto')) node.table.widths = Array(cols).fill('*');
+    if (node.table.headerRows > body.length) node.table.headerRows = 0;
+    body.forEach(row => row.forEach(fitToPage));
   }
   for (const k of ['stack', 'columns', 'ul', 'ol', 'text']) if (Array.isArray(node[k])) node[k].forEach(fitToPage);
+}
+
+// last resort when a table still cannot be laid out: every row becomes a line of text
+function plainTables(node) {
+  if (Array.isArray(node)) return node.map(plainTables);
+  if (!node || typeof node !== 'object') return node;
+  if (node.table) {
+    const textOf = (c) => (c == null ? '' : typeof c === 'string' ? c : Array.isArray(c) ? c.map(textOf).join(' ') : [c.text, c.stack, c.ul, c.ol].filter(Boolean).map(textOf).join(' '));
+    return { stack: (node.table.body || []).map(r => ({ text: (Array.isArray(r) ? r : []).map(textOf).filter(t => t.trim()).join('   |   '), margin: [0, 0, 0, 4] })), margin: [0, 4, 0, 8] };
+  }
+  const out = { ...node };
+  for (const k of ['stack', 'columns', 'ul', 'ol', 'text']) if (Array.isArray(out[k])) out[k] = out[k].map(plainTables);
+  return out;
 }
 
 // the parts of the reader HTML: one string per Word page (page breaks kept)
@@ -127,6 +154,11 @@ export async function wordToPdf(file, onStep = () => {}, key) {
   };
   onStep('PDF səhifələri düzülür');
   return inWorker(def, onStep).catch((e) => {
+    if (/worker/i.test(e?.message || '')) throw e;
+    // a table the PDF maker cannot draw: try once more with tables as plain rows
+    onStep('PDF yenidən qurulur');
+    return inWorker({ ...def, content: plainTables(def.content) }, onStep);
+  }).catch((e) => {
     // a very old browser without module workers: build it here instead
     if (!/worker/i.test(e?.message || '')) throw e;
     def.footer = (page, count) => ({ text: `${page} / ${count}`, alignment: 'center', fontSize: 8, color: '#8a9ba8', margin: [0, 18, 0, 0] });
@@ -147,7 +179,12 @@ function inWorker(def, onStep) {
       else if (data.done) { w.terminate(); resolve(new Blob([data.done], { type: 'application/pdf' })); }
       else if (data.error) { w.terminate(); reject(new Error(data.error)); }
     };
-    w.onerror = (e) => { w.terminate(); reject(new Error(`worker: ${e.message || 'PDF qurulmadı'}`)); };
+    w.onerror = (e) => { w.terminate(); reject(new Error(e.message && !/^Uncaught/.test(e.message) ? e.message : `worker: ${e.message || 'PDF qurulmadı'}`)); };
+    // nothing for a long time means the PDF maker got stuck
+    let idle = setTimeout(stuck, 180000);
+    function stuck() { w.terminate(); reject(new Error('PDF qurulması çox uzun çəkdi')); }
+    const on = w.onmessage;
+    w.onmessage = (ev) => { clearTimeout(idle); if (!ev.data.done && !ev.data.error) idle = setTimeout(stuck, 180000); on(ev); };
     w.postMessage({ def });
   });
 }

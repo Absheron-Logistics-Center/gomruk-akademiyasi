@@ -6,6 +6,11 @@ import * as fonts from 'pdfmake/build/vfs_fonts';
 const pdfMake = pdfMakeLib.default || pdfMakeLib;
 pdfMake.vfs = fonts.default?.pdfMake?.vfs || fonts.pdfMake?.vfs || fonts.default?.vfs || fonts.vfs || fonts.default;
 
+// errors that happen later inside the PDF maker must still reach the page
+const fail = (e) => self.postMessage({ error: e?.message || String(e || 'PDF qurulmadı') });
+self.addEventListener('unhandledrejection', (ev) => { ev.preventDefault(); fail(ev.reason); });
+self.addEventListener('error', (ev) => { ev.preventDefault(); fail(ev.error || ev.message); });
+
 self.onmessage = ({ data }) => {
   const def = data.def;
   def.footer = (page, count) => ({ text: `${page} / ${count}`, alignment: 'center', fontSize: 8, color: '#8a9ba8', margin: [0, 18, 0, 0] });
@@ -21,6 +26,6 @@ self.onmessage = ({ data }) => {
       }
     });
   } catch (e) {
-    self.postMessage({ error: e?.message || String(e) });
+    fail(e);
   }
 };

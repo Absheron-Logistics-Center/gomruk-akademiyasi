@@ -528,7 +528,7 @@ function WordView({ blob, doc, bar }) {
     return () => { alive = false; };
   }, [blob, doc.name]);
 
-  const html = useMemo(() => parsed?.html?.replace('</head>', `<style>${READER_CSS}</style></head>`) || '', [parsed]);
+  const html = useMemo(() => parsed?.html?.replace(/<script[\s\S]*?<\/script>/gi, '').replace('</head>', `<style>${READER_CSS}</style></head>`) || '', [parsed]);
   const docOf = () => frame.current?.contentDocument || null;
 
   const applyZoom = useCallback(() => {
