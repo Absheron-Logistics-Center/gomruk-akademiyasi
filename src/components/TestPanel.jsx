@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useUi } from './ui.jsx';
 import { api } from '../lib/api.js';
+import { rereadBank } from '../lib/ops.js';
 import {
   PAGE_SIZE, niceTime, problemOf, isRight, results, answered, elapsed, newSession, pause, resume,
   loadSession, storeSession, dropSession, optionList
@@ -68,6 +69,11 @@ export default function TestPanel({ type, id, name, tests, limitMin = 0, user, o
       if (!questions) {
         const bank = await api.tests(id);
         questions = Array.isArray(bank?.questions) ? bank.questions : [];
+        // questions whose answer key was not understood: read the Word file again
+        if (questions.some(q => problemOf(q))) {
+          const fixed = await rereadBank(id, tests, questions).catch(() => null);
+          if (fixed) { toast(`Test bankı yenidən oxundu: ${questions.filter(q => problemOf(q)).length - fixed.filter(q => problemOf(q)).length} sualın cavabı tapıldı.`); questions = fixed; }
+        }
       }
       if (!questions.length) throw new Error('Bu paketdə işlənə bilən sual yoxdur.');
       setS(newSession({ key, type, id, name, mode: forceMode || mode, questions, stamp, limitMin, subset: !!subset }));

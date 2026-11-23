@@ -18,6 +18,9 @@ const READER_CSS = `
   mark.ga-hit{background:#fde68a;color:inherit;border-radius:2px;padding:0 1px}
   mark.ga-hit.cur{background:#f59e0b;color:#fff;box-shadow:0 0 0 2px rgba(245,158,11,.35)}
   body{transition:none}
+  ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#cfdae0;border-radius:10px;border:3px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background-color:#a9bcc6}::-webkit-scrollbar-button{display:none;width:0;height:0}
 `;
 const ZOOMS = [50, 75, 100, 125, 150, 200, 300];
 const readPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === '1'; } catch { return d; } };

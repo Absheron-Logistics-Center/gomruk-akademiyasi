@@ -1,6 +1,6 @@
 // ops.js — the steps that change lessons (shared by the add dialog and the folder import).
 import { api } from './api.js';
-import { uploadFile, extOf } from './files.js';
+import { uploadFile, extOf, loadDoc } from './files.js';
 import { GAWord, GACompat } from './gaParse.js';
 import { problemOf } from './tests.js';
 import { queuePdf } from './pdfQueue.js';
@@ -15,6 +15,19 @@ export async function readTestBank(file) {
   }
   const blocked = questions.filter(q => problemOf(q)).length;
   return { questions, blocked };
+}
+
+// A test bank saved with an older reader may have questions whose answer key was not
+// understood. Read its Word file again; if more questions work now, save that for everyone.
+export async function rereadBank(owner, tests, questions) {
+  const broken = questions.filter(q => problemOf(q)).length;
+  if (!broken || !tests?.source) return null;
+  const blob = await loadDoc(tests.source);
+  const bank = await readTestBank(new File([blob], tests.source.name));
+  // keep it only if more questions can be worked now than before
+  if (bank.questions.length - bank.blocked <= questions.length - broken) return null;
+  await api.saveTests(owner, { questions: bank.questions, keepSource: true });
+  return bank.questions;
 }
 
 // owner: lesson id or exam id; bank: result of readTestBank

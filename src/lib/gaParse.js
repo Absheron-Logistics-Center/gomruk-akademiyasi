@@ -92,20 +92,45 @@ async function fromDocx(file){
  const all=lines.map(x=>x.text).join('\n');const index=pages.length>1?pages.map((p,i)=>({page:i+1,text:all.slice(0,120000)})):[{page:1,text:all.slice(0,1200000)}];
  return {html,index,lines,count:lines.length,filename:file.name};
 }
-const aliases={'ID':'id','MENBE':'source','SOURCE':'source','MOVZU':'topic','CHAPTER':'topic','FESIL':'topic','DIFFICULTY':'difficulty','CETINLIK':'difficulty','NOV':'type','TYPE':'type','SUAL':'text','QUESTION':'text','DUZGUN CAVAB':'correct_answers','DUZGUN CAVABLAR':'correct_answers','CORRECT':'correct_answers','CORRECT ANSWER':'correct_answers','CAVAB':'correct_answers','ANSWER':'correct_answers','IZAH':'explanation','EXPLANATION':'explanation','HUQUQI ISTINAD':'reference','ISTINAD':'reference','REFERENCE':'reference'};
-function parseAnswer(s){const t=q(s).replace(/[.\s]+$/,'').replace(/^(?:VARIANTLAR?|CAVABLAR?|ANSWER|OPTION)\s*[:\-]?\s*/,'').trim();if(!/^[A-E](?:\s*(?:[,;/+&]|VE|AND)\s*[A-E])*$/i.test(t))return [];return [...new Set(t.match(/[A-E]/g)||[])];}
+const aliases={'ID':'id','MENBE':'source','SOURCE':'source','MOVZU':'topic','CHAPTER':'topic','FESIL':'topic','DIFFICULTY':'difficulty','CETINLIK':'difficulty','NOV':'type','TYPE':'type','SUAL':'text','QUESTION':'text','DUZGUN CAVAB':'correct_answers','DUZGUN CAVABLAR':'correct_answers','CORRECT':'correct_answers','CORRECT ANSWER':'correct_answers','CAVAB':'correct_answers','ANSWER':'correct_answers','DUZGUN VARIANT':'correct_answers','DUZGUN VARIANTLAR':'correct_answers','DOGRU CAVAB':'correct_answers','DOGRU CAVABLAR':'correct_answers','DOGRU VARIANT':'correct_answers','CAVAB ACARI':'correct_answers','ACAR':'correct_answers','KEY':'correct_answers','ANSWER KEY':'correct_answers','RIGHT ANSWER':'correct_answers','CORRECT ANSWERS':'correct_answers','CORRECT OPTION':'correct_answers','CORRECT OPTIONS':'correct_answers','IZAH':'explanation','EXPLANATION':'explanation','HUQUQI ISTINAD':'reference','ISTINAD':'reference','REFERENCE':'reference'};
+// the answer key, written in any of the usual ways: "B", "ABC", "A, B və C", "A/C",
+// "Variant B", "B) Hərbi istifadə...", "A və C variantları"
+function parseAnswer(s){
+ let t=q(s).replace(/^(?:(?:DUZGUN|DOGRU)\s+)?(?:VARIANTLAR?|CAVABLAR?|ANSWERS?|OPTIONS?)\s*[:\-]?\s*/,'').replace(/[.\s]+$/,'').trim();
+ const letters=x=>[...new Set(x.match(/[A-E]/g)||[])].sort();
+ const only=t.replace(/\b(?:VE|AND|ILE)\b/g,',');
+ if(/^[A-E](?:[\s,;/+&|.\-]*[A-E])*[\s,;/+&|.\-]*$/.test(only))return letters(only);
+ const lead=/^([A-E](?:\s*(?:[,;/+&]|\bVE\b|\bAND\b)\s*[A-E])*)(?=\s*[)\-–—:(]|\s+[A-Z]{2,}|$)/.exec(t);
+ if(lead)return letters(lead[1]);
+ return [];
+}
+// a key written inside the explanation: "Düzgün cavab: B", "Doğru variantlar A və C"
+function answerInText(s){
+ const m=/(?:DUZGUN|DOGRU)\s+(?:CAVAB|VARIANT)(?:LAR)?(?:\s+(?:BUDUR|BUNLARDIR))?\s*[:\-–—]?\s*([A-E](?:\s*(?:[,;/+&]|\bVE\b)\s*[A-E])*)(?![A-Z])/.exec(q(s));
+ return m?[...new Set(m[1].match(/[A-E]/g))].sort():[];
+}
+// an option marked as the right one in the text itself: "* B: ...", "B: ... ✓", "B: ... (düzgün)"
+const MARK_BEFORE=/^(?:\*|\+|✓|✔|☑)\s*/u, MARK_AFTER=/\s*(?:\*|✓|✔|☑|\((?:düzgün|doğru|duzgun|dogru|correct|true)\))\s*$/iu;
 function parseQuestions(lines){
  const out=[];let current=null,field='';
- const fresh=()=>({id:'',source:'',topic:'',difficulty:'',type:'unknown',text:'',options:[],correct_answers:[],explanation:'',reference:'',_red:[],_rawType:''});
+ const fresh=()=>({id:'',source:'',topic:'',difficulty:'',type:'unknown',text:'',options:[],correct_answers:[],explanation:'',reference:'',_red:[],_marked:[],_rawType:''});
  const ensure=()=>{if(!current)current=fresh();return current};
  function flush(){if(!current)return;
-   if(current.text){
-    if(!current.correct_answers.length&&current._red.length)current.correct_answers=[...new Set(current._red)];
+   // a heading or note without answer variants is not a question
+   if(current.text&&current.options.length){
+    // the key line first, then a marked option, then red text, then the explanation
+    const keys=new Set(current.options.map(o=>o.key));
+    const okKey=a=>a.length&&a.every(k=>keys.has(k));
+    if(!okKey(current.correct_answers)){
+     const tries=[current._marked,current._red,answerInText(current.explanation),answerInText(current.text)];
+     const found=tries.map(a=>[...new Set(a)].filter(k=>keys.has(k))).find(a=>a.length);
+     if(found)current.correct_answers=found;
+    }
     const kind=q(current._rawType);
     if(kind){if(/MULTI|COX|BIR NECE|BIRDEN/.test(kind))current.type='multiple';else if(/SINGLE|TEK|BIR DUZGUN|BIR CAVAB/.test(kind))current.type='single';else current.type='unknown'}
     else if(current.correct_answers.length>1)current.type='multiple';
     else if(current.correct_answers.length===1)current.type='single';
-    delete current._red;delete current._rawType;out.push(current);
+    delete current._red;delete current._marked;delete current._rawType;out.push(current);
    }
    current=null;field='';
  }
@@ -116,13 +141,16 @@ function parseQuestions(lines){
    if(current?.text)flush();ensure();field='';continue;
   }
   // Recognize A:, B:, C:, D:, E: before generic metadata: alternatives must not disappear.
-  const opt=/^([A-Ea-e])\s*[).:–-]\s*(.*)$/u.exec(line);
+  const starred=/^(?:\*|\+|✓|✔|☑)\s*(?=[A-Ea-e]\s*[).:–-])/u.test(line);
+  const opt=/^([A-Ea-e])\s*[).:–-]\s*(.*)$/u.exec(starred?line.replace(/^(?:\*|\+|✓|✔|☑)\s*/u,''):line);
   if(opt&&current?.text){
    const k=opt[1].toUpperCase();
    if(current.options.some(o=>o.key===k)){
     if(k==='A'){flush();ensure();}else {current.options[current.options.length-1].text+=' '+line;continue;}
    }
-   current.options.push({key:k,text:opt[2].trim()});if(row.red)current._red.push(k);field='options';continue;
+   let otext=opt[2].trim();if(starred)current._marked.push(k);
+   if(MARK_BEFORE.test(otext)||MARK_AFTER.test(otext)){otext=otext.replace(MARK_BEFORE,'').replace(MARK_AFTER,'').trim();current._marked.push(k)}
+   current.options.push({key:k,text:otext});if(row.red)current._red.push(k);field='options';continue;
   }
   const label=/^([A-Za-zƏəĞğİıIÖöŞşÜüÇç\s]{2,40})\s*[:：]\s*(.*)$/u.exec(line);
   const key=label?aliases[q(label[1])]:null;
@@ -136,7 +164,8 @@ function parseQuestions(lines){
    continue;
   }
   // Classic numbered questions in earlier training documents.
-  const number=/^(?:SUAL\s*)?(\d{1,5})\s*[.):–-]\s*(.+)$/iu.exec(line);
+  // (not "16-cı fəsil" or "687-IVQ": an ordinal or a law number is not a question)
+  const number=/^(?:SUAL\s*)?(\d{1,5})\s*[.):–-](?!\s*(?:c[iıuü]|[iıuü]nc[iıuü])\b)(?!\s*[IVX]+Q\b)\s*(.+)$/iu.exec(line);
   if(number&&(current===null||current.text&&current.options.length)){
     flush();ensure();current.text=number[2].trim();field='text';continue;
   }

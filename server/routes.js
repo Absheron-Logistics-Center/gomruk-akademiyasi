@@ -204,7 +204,9 @@ router.put('/tests/:id', express.json({ limit: '4mb' }), wrap(async (req, res) =
   const id = req.params.id;
   // the Word file it was read from (uploaded just before as 'test-source')
   let source = null;
-  if (req.body.sourceDocId) {
+  // keepSource: the same Word file was read again with a better reader; nothing else changes
+  const keep = !!req.body.keepSource;
+  if (req.body.sourceDocId && !keep) {
     source = (await getJson(`pending/${String(req.body.sourceDocId)}`))?.content || null;
     if (!source) throw err(400, 'Test faylı tapılmadı. Yenidən yükləyin.');
   }
@@ -214,11 +216,12 @@ router.put('/tests/:id', express.json({ limit: '4mb' }), wrap(async (req, res) =
   await updateCatalog(c => {
     const { item } = owner(c, id);
     old = item.tests?.source || null;
+    if (keep && item.tests) { item.tests = { ...item.tests, count: questions.length, rereadAt: new Date().toISOString() }; return; }
     item.tests = { count: questions.length, source, updatedAt: new Date().toISOString(), by: who(req) };
     item.updatedAt = item.tests.updatedAt;
   });
   if (source) await deleteJson(`pending/${source.id}`).catch(() => {});
-  if (old && old.id !== source?.id) await dropDoc(old);
+  if (old && !keep && old.id !== source?.id) await dropDoc(old);
   res.json({ ok: true, count: questions.length });
 }));
 
