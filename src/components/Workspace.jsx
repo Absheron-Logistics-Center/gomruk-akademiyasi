@@ -217,7 +217,6 @@ export default function Workspace({ active, title, subtitle, tools, children, ..
                 );
               })}
               {!(catalog?.exams || []).length && <button className="ws-none ws-add-exam" onClick={addExam}>Yekun sınaq əlavə et</button>}
-              ))}
             </div>
           </div>
         </aside>

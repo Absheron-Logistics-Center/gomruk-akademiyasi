@@ -276,7 +276,7 @@ a { color: inherit; }
 .reader {
   display: flex; flex-direction: column; background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden;
-  height: max(560px, calc(100vh - var(--topbar-h) - 210px));
+  height: max(480px, calc(100vh - var(--topbar-h) - 90px));
 }
 .reader:fullscreen { height: 100vh; border-radius: 0; border: 0; }
 .reader-state {
@@ -564,7 +564,7 @@ input.page-input {
 .ws-exam.empty .ws-name { color: var(--text-muted); }
 .ws-none { padding: 10px 12px; font-size: 12.5px; color: var(--text-muted); }
 .ws-main { flex: 1; min-width: 0; }
-.ws-page { padding: 20px 28px 56px; animation: fade-in 0.25s var(--ease); }
+.ws-page { padding: 18px 24px 16px; animation: fade-in 0.25s var(--ease); }
 .ws-menu-btn { display: none; }
 .ws-scrim { display: none; }
 @media (max-width: 900px) {
@@ -576,7 +576,8 @@ input.page-input {
   .ws-scrim { display: block; position: fixed; inset: 0; z-index: 150; background: rgba(28, 75, 100, 0.22); animation: fade-in 0.2s; }
   .ws-close { display: grid; }
   .ws-menu-btn { display: inline-flex; }
-  .ws-page { padding: 16px 12px 48px; }
+  .ws-page { padding: 14px 12px 16px; }
+  .reader { height: max(460px, calc(100vh - var(--topbar-h) - 190px)); }
 }
 
 /* ---------- lesson title in the top bar ---------- */
@@ -647,3 +648,14 @@ input.page-input {
 .pdf-banner.bad { color: var(--danger); background: var(--danger-soft); border-bottom-color: rgba(220, 38, 38, 0.2); }
 .pdf-banner button { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; color: inherit; padding: 3px 8px; border-radius: 5px; }
 .pdf-banner button:hover { background: rgba(255, 255, 255, 0.6); }
+
+/* ---------- the site's own PDF viewer ---------- */
+.pdf-scroller {
+  position: relative; flex: 1; min-height: 0; overflow: auto; background: #e4eaef;
+  display: flex; flex-direction: column; align-items: safe center; gap: 14px; padding: 18px 20px 28px;
+}
+.pdf-page { position: relative; flex-shrink: 0; background: #fff; box-shadow: 0 1px 3px rgba(28, 75, 100, 0.12), 0 6px 18px rgba(28, 75, 100, 0.08); }
+.pdf-page canvas { display: block; }
+.pdf-page-no { position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; color: var(--text-muted); }
+.tool-label.of { min-width: 0; padding-right: 4px; font-weight: 600; color: var(--text-muted); }
+.reader:fullscreen .pdf-scroller { padding-top: 24px; }

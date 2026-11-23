@@ -135,18 +135,6 @@ export default function AddDialog({ kind, edit, catalog, onClose, onDone }) {
         </button>
       </>}>
       <div className="add-form">
-        {!isSection && (
-          <div className="field-block">
-            <label>Nə əlavə edirsiniz?</label>
-            <div className="seg">
-              <button type="button" className={target === 'lesson' ? 'on' : ''} onClick={() => setTarget('lesson')} disabled={busy}>Adi dərs</button>
-              {(catalog?.exams || []).map((e, i) => (
-                <button type="button" key={e.id} className={target === e.id ? 'on' : ''} onClick={() => setTarget(e.id)} disabled={busy}>{e.title}</button>
-              ))}
-            </div>
-          </div>
-        )}
-
         {!isSection && !exam && (
           <div className="field-block">
             <label htmlFor="ga-title">Dərsin adı</label>

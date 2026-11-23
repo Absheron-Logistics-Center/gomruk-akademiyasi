@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import {
   Search, Plus, FolderUp, GripVertical, Pencil, Trash2, FileText, BookOpen, ListChecks,
-  ChevronRight, Loader2, PlayCircle, Library
+  ChevronRight, Loader2, PlayCircle, Library, GraduationCap, Timer
 } from 'lucide-react';
 import Topbar from './Topbar.jsx';
 import AddDialog from './AddDialog.jsx';
@@ -62,6 +62,26 @@ export default function Home(props) {
       await reload();
       toast('Dərs silindi.');
     } catch (e) { toast(e.message, 'error'); }
+  }
+
+  /* ---------- final exams ---------- */
+  async function addExam() {
+    const title = await prompt({ title: 'Yeni yekun sınaq', label: 'Sınağın adı', value: `Yekun sınaq ${(catalog?.exams || []).length + 1}`, confirmLabel: 'Əlavə et' });
+    if (!title) return;
+    try { const ex = await api.addExam(title); await reload(); toast(`"${title}" əlavə edildi.`); go(`/sinaq/${ex.id}`); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+  async function renameExam(ex) {
+    const title = await prompt({ title: 'Sınağın adını dəyiş', label: 'Ad', value: ex.title });
+    if (!title || title === ex.title) return;
+    try { await api.saveExam(ex.id, { title }); await reload(); toast('Ad dəyişdirildi.'); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+  async function removeExam(ex) {
+    const ok = await confirm({ title: `"${ex.title}" silinsin?`, danger: true, confirmLabel: 'Sınağı sil', text: `${ex.tests ? 'Bu sınaq və onun test bankı' : 'Bu sınaq'} silinəcək. Silinmə hamı üçündür və geri qaytarılmır.` });
+    if (!ok) return;
+    try { await api.deleteExam(ex.id); dropSession(user?.username, `exam:${ex.id}`); await reload(); toast('Sınaq silindi.'); }
+    catch (e) { toast(e.message, 'error'); }
   }
 
   /* ---------- drag to reorder ---------- */
@@ -170,6 +190,40 @@ export default function Home(props) {
               </div>
             </section>
 
+            <section className="group-card open">
+              <div className="group-head static">
+                <span className="group-folder"><GraduationCap size={18} /></span>
+                <span className="group-name">Yekun sınaqlar</span>
+                <span className="group-count">{catalog.exams.filter(e => e.tests).length} / {catalog.exams.length}</span>
+              </div>
+              <div className="group-body">
+                {catalog.exams.map((ex, i) => (
+                  <div key={ex.id} className="lesson-row">
+                    <div className={`process-item exam-row ${ex.tests ? '' : 'is-empty'}`} role="button" tabIndex={0}
+                      onClick={() => go(`/sinaq/${ex.id}`)} onKeyDown={e => { if (e.key === 'Enter') go(`/sinaq/${ex.id}`); }}>
+                      <span className="num">{i + 1}</span>
+                      <span className="label">
+                        {ex.title}
+                        <span className="row-meta">
+                          {ex.tests
+                            ? <span className="meta-chip"><ListChecks size={13} />{ex.tests.count} sual</span>
+                            : <span className="meta-chip muted">Test bankı əlavə edilməyib</span>}
+                          {ex.timeLimitMin > 0 && <span className="meta-chip"><Timer size={13} />{ex.timeLimitMin} dəq</span>}
+                        </span>
+                      </span>
+                      <span className="row-actions" onClick={e => e.stopPropagation()}>
+                        <button className="group-act-btn" title="Adını dəyiş" onClick={() => renameExam(ex)}><Pencil size={14} /></button>
+                        <button className="group-act-btn danger" title="Sınağı sil" onClick={() => removeExam(ex)}><Trash2 size={14} /></button>
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                <button className="process-item create-btn" onClick={addExam}>
+                  <span className="num"><Plus size={16} /></span>
+                  <span className="label">Yeni yekun sınaq əlavə et</span>
+                </button>
+              </div>
+            </section>
           </div>
         )}
       </div>
