@@ -1,5 +1,5 @@
-// app.js — the site's API. It runs only on your own server (server.js);
-// the Vercel site passes every /api request through to it (api/index.js).
+// app.js — the site's API. On Vercel it runs as a function (api/index.js);
+// on your own computer / server through server.js.
 //
 // Sign-in: everyone types their name. If APP_PASSWORD is set, the shared
 // password is asked too. Everyone who is signed in can add, change and delete.
@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import routes from './routes.js';
 import fs from 'fs';
 import path from 'path';
-import { dataDir, ready } from './store.js';
+import { dataDir, storageProblem, useRedis, useBlob } from './store.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -20,6 +20,11 @@ let key = null;
 function secret() {
   if (process.env.APP_SECRET) return process.env.APP_SECRET;
   if (key) return key;
+  // Vercel has no disk to keep one on: made from the storage keys, which never change
+  if (process.env.VERCEL || process.env.VERCEL_ENV) {
+    key = crypto.createHash('sha256').update(`gomruk:${process.env.BLOB_READ_WRITE_TOKEN || ''}:${process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || ''}:${process.env.APP_PASSWORD || ''}`).digest('hex');
+    return key;
+  }
   const f = path.join(dataDir(), 'secret.txt');
   try { key = fs.readFileSync(f, 'utf8').trim(); } catch { /* first start */ }
   if (!key) {
@@ -52,9 +57,8 @@ function sameText(a, b) {
   return crypto.timingSafeEqual(x, y);
 }
 
-ready().catch(e => console.error('[data]', e.message));
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
-app.get('/api/config', (_req, res) => res.json({ passwordRequired: !!process.env.APP_PASSWORD, storage: true }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, storage: storageProblem() ? 'missing' : useRedis() && useBlob() ? 'vercel' : 'disk' }));
+app.get('/api/config', (_req, res) => res.json({ passwordRequired: !!process.env.APP_PASSWORD, storage: !storageProblem(), problem: storageProblem() || null }));
 
 // slow down password guessing: 10 wrong tries per address, then wait 10 minutes
 const tries = new Map();

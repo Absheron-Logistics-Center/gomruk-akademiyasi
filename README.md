@@ -2,66 +2,73 @@
 
 Normativ aktlar, izahlı tədris materialları və testlər üçün sayt. Görünüşü Map-Panel kimidir, amma tam ayrıdır.
 
-- **Sayt Vercel-dədir.** Bütün dərslər, PDF / Word faylları və testlər **öz serverinizin diskində**
-  (`data` qovluğu) saxlanılır. Verilənlər bazası (MongoDB) yoxdur.
-- Vercel hər sorğunu serverinizə ötürür. Vercel-də silinən sənəd elə serverdən silinir: ayrıca yer yoxdur.
-- Daxil olmaq: ad yazılır. Serverdə `APP_PASSWORD` təyin etsəniz, hamı üçün bir ortaq şifrə də soruşulur.
-- Daxil olan hər kəs dərs, sənəd və test əlavə edə, dəyişə, silə bilər.
+- **Sayt Vercel-dədir** və istənilən kompüterdən, istənilən internetdən açılır.
+- Dərslərin siyahısı və testlər **Upstash Redis**-də, PDF / Word faylları **Vercel Blob**-da saxlanılır
+  (ikisi də Vercel-in içindən, pulsuz).
+- **Öz serveriniz hər dəqiqə bütün faylların nüsxəsini `data` qovluğuna çəkir.** Saytda silinən sənəd
+  serverdən də silinir. Server yalnız çölə qoşulur, routerdə port açmaq lazım deyil.
+- Daxil olmaq: ad + ortaq şifrə (`APP_PASSWORD`). Daxil olan hər kəs əlavə edə, dəyişə, silə bilər.
 - Test cavabları hər istifadəçinin öz brauzerində saxlanılır: səhifə bağlansa da test qaldığı yerdən davam edir.
 
-## 1. Server (öz kompüteriniz / Windows server)
+## 1. Vercel (bir dəfə)
 
-Node.js 18 və ya daha yeni lazımdır.
+1. Bu qovluğu GitHub-a push edin, Vercel-də layihə kimi əlavə edin (Framework: Vite, özü tanıyır).
+2. Layihədə **Storage** bölməsi:
+   - **Create → Blob** → ad verin → **Connect** (bu layihəyə). `BLOB_READ_WRITE_TOKEN` özü əlavə olunur.
+   - **Create → Upstash for Redis** (Marketplace, Free plan) → **Connect** (bu layihəyə).
+     `KV_REST_API_URL` və `KV_REST_API_TOKEN` özü əlavə olunur.
+3. **Settings → Environment Variables**: `APP_PASSWORD` = ortaq şifrə (məsələn `ALM2026`).
+4. **Deployments → ⋯ → Redeploy**.
 
-```powershell
-cd C:\path\to\gomruk-akademiyasi
-npm install
-copy .env.example .env     # istəsəniz APP_PASSWORD yazın
-npm start                  # http://localhost:3000
+Pulsuz limitlər (Hobby): Blob 1 GB yer, ayda 2 000 yazma / 10 000 oxuma; Redis ayda 500 000 əmr.
+Fayllar 3 MB-lıq hissələrlə saxlanılır; köhnə DERSLER qovluğunun hamısı (~47 MB) təxminən 60 yazma edir.
+
+## 2. Öz server (nüsxə üçün)
+
+`.env` faylı (`server.js`-in yanında):
+
+```
+SITE_URL=https://gomruk-akademiyasi.vercel.app
+APP_PASSWORD=ALM2026
+PORT=3000
+DATA_DIR=data
 ```
 
-- Fayllar `data\` qovluğunda saxlanılır (`DATA_DIR` ilə başqa yer seçmək olar). Ehtiyat nüsxə üçün bu qovluğu kopyalamaq kifayətdir.
-- Port 3000 internetdən açıq olmalıdır (Windows Firewall + router / IT). Və ya veb serveriniz (IIS / Apache)
-  məsələn `http://ünvan/gomruk/...` sorğularını `http://localhost:3000/gomruk/...`-ə ötürsün, `.env`-də `BASE_PATH=/gomruk`.
-- Daima işləməsi üçün MapsPanel kimi Windows xidməti (service) və ya Task Scheduler ilə başladın.
-- Yoxlamaq: brauzerdə `http://ictimai-ünvan:3000/api/health` açın, `{"ok":true}` görünməlidir.
+```powershell
+npm install
+npm start
+```
 
-## 2. Vercel
+`http://localhost:3000` son yenilənmənin vaxtını göstərir. Fayllar belə düzülür:
 
-1. Bu qovluğu GitHub reposuna qoyun (`data` və `.env` repoya düşmür).
-2. Vercel → **Add New Project** → reponu seçin (Framework: Vite, özü tanıyır).
-3. **Settings → Environment Variables**: `GOMRUK_SERVER_URL` = serverinizin ictimai ünvanı, məsələn
-   `http://203.0.113.10:3000` (və ya `BASE_PATH` işlədirsinizsə `http://203.0.113.10/gomruk`).
-4. Deploy.
+```
+data\Dersler\01. <dərsin adı>\Orijinal\...
+data\Dersler\01. <dərsin adı>\Izah\...
+data\Dersler\01. <dərsin adı>\Test\...  (+ suallar.json)
+data\Yekun sinaqlar\1. <ad>\...
+data\catalog.json
+```
 
-Fayllar 3 MB-lıq hissələrlə gedib-gəlir, ona görə Vercel-in 4.5 MB limiti problem deyil.
+`APP_PASSWORD` Vercel-dəki ilə eyni olmalıdır. Daima işləməsi üçün MapsPanel kimi xidmət (service) və ya Task Scheduler ilə başladın.
 
-## Şirkət daxilində Vercel-siz
+## Şirkət daxilində Vercel-siz (istəyə görə)
 
-`npm run build` edib `npm start` işlətsəniz (BASE_PATH boş olanda), sayt da `http://server:3000`-də açılır.
+`.env`-də `SITE_URL` yazmasanız, server saytın özünü işlədir (fayllar `data`-da): `npm run build`, sonra `npm start`,
+`http://172.25.60.81:3000`. Bu halda məlumat Vercel-dəkindən ayrıdır.
 
 ## Köhnə dərsləri köçürmək
 
 Əsas səhifədə **Qovluqdan yüklə** → köhnə `DERSLER` qovluğunu seçin (və ya pəncərəyə sürüşdürün).
-Hər `Ders_XX` bir dərs olur: `ORIGINAL` normativ aktlar, `IZAH` izah, `TEST` Word test bankı, `BASLIQ.txt` dərsin adı.
-Eyni adlı Word və PDF varsa PDF götürülür. Bu adda dərs artıq varsa, siyahıda qeyd olunur və əvvəlcədən seçilmir.
-
-## Lokal inkişaf
-
-```powershell
-npm start        # bir pəncərədə (server, port 3000)
-npm run dev      # başqa pəncərədə (Vite, /api sorğularını 3000-ə ötürür)
-```
+Hər `Ders_XX` bir dərs olur: `ORIGINAL`, `IZAH`, `TEST`, `BASLIQ.txt` dərsin adı. Eyni adlı Word və PDF varsa PDF götürülür.
 
 ## Fayllar
 
 | Yer | Nə edir |
 |---|---|
-| `api/index.js` | Vercel funksiyası: `/api/...` sorğularını serverinizə ötürür |
-| `server.js` | serveri başladır |
+| `api/index.js` | Vercel funksiyası (bütün `/api/...` sorğuları) |
 | `server/app.js` | giriş və API |
 | `server/routes.js` | dərslər, sənədlər, testlər, 3 MB hissələrlə yükləmə / endirmə |
-| `server/store.js` | diskdə saxlama (`data\docs`, `data\files`) |
-| `src/lib/gaParse.js` | Word / RTF / ODT / köhnə .doc oxuyucu və test bankı tanıyıcı (V1.5-dən) |
-| `src/components/` | səhifələr: giriş, dərslər, dərs, sınaq, oxuyucu, test, əlavə etmə |
-| `src/styles/panel.css` | Map-Panel-in stilləri (eyni görünüş üçün) |
+| `server/store.js` | Redis + Blob (Vercel-də), disk (öz serverdə) |
+| `server/mirror.js` | öz serverdə nüsxə: hər dəqiqə saytdan çəkir |
+| `server.js` | öz serveri başladır |
+| `src/` | saytın özü (React) |

@@ -3,12 +3,11 @@
 // and response bodies over 4.5 MB.
 import express, { Router } from 'express';
 import crypto from 'crypto';
-import { getJson, putJson, deleteJson, updateJson, putFile, fileSize, fileRange, deleteFile, parts as partFiles } from './store.js';
+import { getJson, putJson, deleteJson, updateJson, putPiece, getPiece, deletePieces } from './store.js';
 
 const router = Router();
 const CATALOG = 'catalog';
 const TESTS = id => `tests/${id}`;
-const FILE = (id, ext) => `${id}.${ext}`;
 const PART = 3 * 1024 * 1024;
 const MAX_FILE = 95 * 1024 * 1024;
 const EXAMS = 4;
@@ -61,15 +60,18 @@ function owner(cat, id) {
 }
 const docsOf = l => [...(l.originals || []), ...(l.explanation ? [l.explanation] : []), ...(l.tests?.source ? [l.tests.source] : [])];
 
+// a document is kept as pieces of 3 MB under its upload key
+const piecesOf = (d) => d.parts || Math.max(1, Math.ceil((d.size || 0) / PART));
 async function dropDoc(doc) {
   if (!doc?.id) return;
-  await deleteFile(FILE(doc.id, doc.ext)).catch(() => {});
+  await deletePieces(doc.key || doc.id, piecesOf(doc), doc.urls).catch(() => {});
 }
 
 /* ------------------------------ read ------------------------------ */
 router.get('/catalog', wrap(async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  res.json(await readCatalog());
+  // storage addresses stay on the server
+  res.type('json').send(JSON.stringify(await readCatalog(), (k, v) => (k === 'urls' ? undefined : v)));
 }));
 
 router.get('/tests/:id', wrap(async (req, res) => {
@@ -174,25 +176,30 @@ router.put('/tests/:id', express.json({ limit: '4mb' }), wrap(async (req, res) =
   if (!questions?.length) throw err(400, 'Sual tapılmadı.');
   if (questions.length > 3000) throw err(400, 'Çox sual var (maksimum 3000).');
   const id = req.params.id;
+  // the Word file it was read from (uploaded just before as 'test-source')
+  let source = null;
+  if (req.body.sourceDocId) {
+    source = (await getJson(`pending/${String(req.body.sourceDocId)}`))?.content || null;
+    if (!source) throw err(400, 'Test faylı tapılmadı. Yenidən yükləyin.');
+  }
+  // the questions first, so the list never points at a test bank that is not there yet
+  await putJson(TESTS(id), { questions, savedAt: new Date().toISOString(), by: who(req) });
   let old = null;
   await updateCatalog(c => {
     const { item } = owner(c, id);
     old = item.tests?.source || null;
-    item.tests = {
-      count: questions.length,
-      source: req.body.sourceDocId ? { id: String(req.body.sourceDocId), name: String(req.body.sourceName || 'test.docx').slice(0, 250), ext: extOf(req.body.sourceName) || 'docx', size: Number(req.body.sourceSize) || 0 } : null,
-      updatedAt: new Date().toISOString(), by: who(req)
-    };
+    item.tests = { count: questions.length, source, updatedAt: new Date().toISOString(), by: who(req) };
     item.updatedAt = item.tests.updatedAt;
   });
-  await putJson(TESTS(id), { questions, savedAt: new Date().toISOString(), by: who(req) });
-  if (old && old.id !== req.body.sourceDocId) await dropDoc(old);
+  if (source) await deleteJson(`pending/${source.id}`).catch(() => {});
+  if (old && old.id !== source?.id) await dropDoc(old);
   res.json({ ok: true, count: questions.length });
 }));
 
 /* ------------------------------ uploads in parts ------------------------------ */
-// pieces of an upload wait on disk until the last one arrives
-async function partStore() { return partFiles; }
+// Each 3 MB piece is stored where it will stay; "finish" checks that every
+// piece arrived and attaches the document to its lesson.
+const UP_TTL = 6 * 3600;
 
 router.post('/uploads', wrap(async (req, res) => {
   const name = String(req.body?.name || '').slice(0, 250);
@@ -200,10 +207,7 @@ router.post('/uploads', wrap(async (req, res) => {
   const ext = extOf(name);
   if (!DOC_EXT.has(ext)) throw err(400, `Bu fayl növü qəbul edilmir: .${ext}`);
   if (size <= 0 || size > MAX_FILE) throw err(400, 'Faylın həcmi 95 MB-dan böyük ola bilməz.');
-  const id = uid('u');
-  // old unfinished uploads go away
-  partFiles.sweep().catch(() => {});
-  res.json({ uploadId: id, partSize: PART, parts: Math.ceil(size / PART) });
+  res.json({ uploadId: uid('u'), partSize: PART, parts: Math.ceil(size / PART) });
 }));
 
 router.put('/uploads/:id/:n',
@@ -212,59 +216,66 @@ router.put('/uploads/:id/:n',
     const { id, n } = req.params;
     if (!/^u[a-z0-9]+$/i.test(id) || !/^\d{1,3}$/.test(n)) throw err(400, 'Yanlış hissə.');
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw err(400, 'Boş hissə.');
-    await (await partStore()).put(`${id}:${n.padStart(3, '0')}`, req.body);
+    if (req.body.length > PART) throw err(400, 'Hissə 3 MB-dan böyükdür.');
+    const url = await putPiece(id, Number(n), req.body);
+    await putJson(`up/${id}/${Number(n)}`, { size: req.body.length, url, head: Number(n) === 0 ? req.body.subarray(0, 8).toString('latin1') : '' }, { ttlSec: UP_TTL });
     res.json({ ok: true });
   })
 );
 
-// put the parts together and attach the file where it belongs
 //   body: { name, size, parts, owner: lessonId|examId, section: 'original'|'explanation'|'test-source', replace?: docId }
 router.post('/uploads/:id/finish', wrap(async (req, res) => {
   const { id } = req.params;
+  if (!/^u[a-z0-9]+$/i.test(id)) throw err(400, 'Yanlış yükləmə.');
   const b = req.body || {};
   const name = String(b.name || '').slice(0, 250);
   const ext = extOf(name);
+  if (!DOC_EXT.has(ext)) throw err(400, `Bu fayl növü qəbul edilmir: .${ext}`);
   const parts = Math.max(1, Math.min(40, Number(b.parts) || 1));
-  const store = await partStore();
-  const bufs = [];
+  let total = 0, head = '';
+  const urls = [];
   for (let i = 0; i < parts; i++) {
-    const part = await store.get(`${id}:${String(i).padStart(3, '0')}`);
-    if (!part) throw err(400, `Faylın ${i + 1}-ci hissəsi çatmadı. Yenidən cəhd edin.`);
-    bufs.push(part);
+    const p = (await getJson(`up/${id}/${i}`))?.content;
+    if (!p) throw err(400, `Faylın ${i + 1}-ci hissəsi çatmadı. Yenidən cəhd edin.`);
+    total += p.size;
+    if (p.url) urls.push(p.url);
+    if (i === 0) head = p.head || '';
   }
-  const buf = Buffer.concat(bufs);
-  if (Number(b.size) && buf.length !== Number(b.size)) throw err(400, 'Fayl tam yüklənmədi. Yenidən cəhd edin.');
-  if (ext === 'pdf' && buf.subarray(0, 5).toString('latin1') !== '%PDF-') throw err(400, 'Bu fayl etibarlı PDF deyil.');
+  if (Number(b.size) && total !== Number(b.size)) throw err(400, 'Fayl tam yüklənmədi. Yenidən cəhd edin.');
+  if (ext === 'pdf' && !head.startsWith('%PDF-')) {
+    await deletePieces(id, parts, urls);
+    throw err(400, 'Bu fayl etibarlı PDF deyil.');
+  }
+  for (let i = 0; i < parts; i++) await deleteJson(`up/${id}/${i}`).catch(() => {});
 
-  const doc = { id: uid('d'), name, ext, size: buf.length, uploadedAt: new Date().toISOString(), by: who(req) };
-  await putFile(FILE(doc.id, ext), buf);
-  await store.drop(`${id}:`).catch(() => {});
-
+  const doc = { id: uid('d'), key: id, parts, ...(urls.length === parts ? { urls } : {}), name, ext, size: total, uploadedAt: new Date().toISOString(), by: who(req) };
   const section = String(b.section || '');
-  let removed = [];
-  if (section !== 'test-source') {
-    try {
-      await updateCatalog(c => {
-        removed = [];
-        const { item, kind } = owner(c, String(b.owner || ''));
-        if (kind !== 'lesson') throw err(400, 'Sınağa yalnız test faylı əlavə olunur.');
-        if (section === 'original') {
-          item.originals = item.originals || [];
-          const at = b.replace ? item.originals.findIndex(x => x.id === b.replace) : -1;
-          if (at >= 0) { removed.push(item.originals[at]); item.originals[at] = doc; } else item.originals.push(doc);
-        } else if (section === 'explanation') {
-          if (item.explanation) removed.push(item.explanation);
-          item.explanation = doc;
-        } else throw err(400, 'Bölmə düz deyil.');
-        item.updatedAt = doc.uploadedAt; item.updatedBy = doc.by;
-      });
-    } catch (e) {
-      await deleteFile(FILE(doc.id, ext)).catch(() => {});
-      throw e;
-    }
-    for (const d of removed) await dropDoc(d);
+  if (section === 'test-source') {
+    // waits for PUT /tests/:id, which links it with the questions read from it
+    await putJson(`pending/${doc.id}`, doc, { ttlSec: UP_TTL });
+    return res.status(201).json(doc);
   }
-  // test-source: the file is kept; PUT /tests/:id links it with the parsed questions
+  let removed = [];
+  try {
+    await updateCatalog(c => {
+      removed = [];
+      const { item, kind } = owner(c, String(b.owner || ''));
+      if (kind !== 'lesson') throw err(400, 'Sınağa yalnız test faylı əlavə olunur.');
+      if (section === 'original') {
+        item.originals = item.originals || [];
+        const at = b.replace ? item.originals.findIndex(x => x.id === b.replace) : -1;
+        if (at >= 0) { removed.push(item.originals[at]); item.originals[at] = doc; } else item.originals.push(doc);
+      } else if (section === 'explanation') {
+        if (item.explanation) removed.push(item.explanation);
+        item.explanation = doc;
+      } else throw err(400, 'Bölmə düz deyil.');
+      item.updatedAt = doc.uploadedAt; item.updatedBy = doc.by;
+    });
+  } catch (e) {
+    await dropDoc(doc);
+    throw e;
+  }
+  for (const d of removed) await dropDoc(d);
   res.status(201).json(doc);
 }));
 
@@ -280,17 +291,16 @@ async function findDoc(docId) {
 router.get('/files/:docId/meta', wrap(async (req, res) => {
   const d = await findDoc(req.params.docId);
   if (!d) throw err(404, 'Sənəd tapılmadı.');
-  const size = await fileSize(FILE(d.id, d.ext));
-  if (size == null) throw err(404, 'Sənədin faylı tapılmadı.');
-  res.json({ ...d, size, partSize: PART, mime: MIME[d.ext] || 'application/octet-stream' });
+  const { urls: _hidden, ...pub } = d;   // storage addresses stay on the server
+  res.json({ ...pub, partSize: PART, mime: MIME[d.ext] || 'application/octet-stream' });
 }));
 
 router.get('/files/:docId', wrap(async (req, res) => {
   const d = await findDoc(req.params.docId);
   if (!d) throw err(404, 'Sənəd tapılmadı.');
-  const part = Math.max(0, Number(req.query.part) || 0);
-  const start = part * PART;
-  const buf = await fileRange(FILE(d.id, d.ext), start, start + PART);
+  const part = Math.max(0, Math.floor(Number(req.query.part) || 0));
+  if (part >= piecesOf(d)) throw err(404, 'Belə hissə yoxdur.');
+  const buf = await getPiece(d.key || d.id, part, d.urls?.[part]);
   if (!buf) throw err(404, 'Sənədin faylı tapılmadı.');
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');   // a doc id never changes content

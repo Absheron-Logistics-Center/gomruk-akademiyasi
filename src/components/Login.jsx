@@ -14,7 +14,7 @@ export default function Login({ onLogin }) {
   useEffect(() => {
     api.config().then(c => {
       setNeedPassword(!!c?.passwordRequired);
-      if (c && !c.storage) setError('Yaddaş qoşulmayıb: MONGODB_URI təyin edilməyib.');
+      if (c && !c.storage) setError(c.problem || 'Yaddaş qoşulmayıb.');
     }).catch(() => {});
   }, []);
 
