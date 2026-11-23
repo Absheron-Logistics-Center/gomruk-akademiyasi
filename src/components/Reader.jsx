@@ -11,7 +11,7 @@ import { Progress } from './ui.jsx';
 import Drop from './Drop.jsx';
 import '../styles/pdf-text.css';
 import { loadDoc, saveBlob, isPdf, fmtSize } from '../lib/files.js';
-import { GACompat } from '../lib/gaParse.js';
+import { parseDoc } from '../lib/docCache.js';
 import { queuePdf, subscribe, retryPdf } from '../lib/pdfQueue.js';
 
 const READER_CSS = `
@@ -522,8 +522,7 @@ function WordView({ blob, doc, bar }) {
   useEffect(() => {
     let alive = true;
     setParsed(null); setErr('');
-    const file = new File([blob], doc.name, { type: blob.type });
-    GACompat.read(file, 'document')
+    parseDoc(doc.id, blob, doc.name)
       .then(r => { if (alive) setParsed(r); })
       .catch(e => { if (alive) setErr(e.message); });
     return () => { alive = false; };

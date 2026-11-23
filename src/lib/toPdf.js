@@ -1,7 +1,7 @@
 // toPdf.js — turns a Word / RTF / ODT / old .doc file into a PDF in the browser.
 // The text, headings, bold / italic / underline, colours, tables and pictures
 // are kept; the file is read with the same reader the site uses everywhere.
-import { GACompat } from './gaParse.js';
+import { parseDoc } from './docCache.js';
 
 export const isWordName = (name) => /\.(doc|docx|docm|dot|dotx|dotm|rtf|odt|ott|xml|txt)$/i.test(String(name || ''));
 
@@ -82,29 +82,40 @@ function fitToPage(node) {
 }
 
 // the parts of the reader HTML: one string per Word page (page breaks kept)
+// long pages are cut into pieces of a few dozen blocks so the site stays responsive
+const PIECE = 60;
 function pagesOf(fullHtml) {
   const d = new DOMParser().parseFromString(fullHtml, 'text/html');
-  const pages = [...d.querySelectorAll('div.docpage')].map(p => p.innerHTML);
-  return pages.length ? pages : [d.body.innerHTML];
+  const roots = [...d.querySelectorAll('div.docpage')];
+  const out = [];
+  for (const root of (roots.length ? roots : [d.body])) {
+    const kids = [...root.children];
+    if (kids.length <= PIECE) { out.push({ html: root.innerHTML, first: true }); continue; }
+    for (let i = 0; i < kids.length; i += PIECE) {
+      out.push({ html: kids.slice(i, i + PIECE).map(k => k.outerHTML).join(''), first: i === 0 });
+    }
+  }
+  return out;
 }
 
 /**
  * file: File or Blob with a name. Returns a PDF Blob.
  * onStep(text) tells what is happening.
  */
-export async function wordToPdf(file, onStep = () => {}) {
+export async function wordToPdf(file, onStep = () => {}, key) {
   onStep('Sənəd oxunur');
-  const parsed = await GACompat.read(file, 'document');
+  const parsed = await parseDoc(key, file, file.name);
   if (parsed.format === 'pdf') return file;
   onStep('PDF qurulur');
   const { pdfMake, htmlToPdfmake } = await load();
   const pages = pagesOf(parsed.html);
   const content = [];
-  for (const [i, html] of pages.entries()) {
-    const blocks = pageBlocks(htmlToPdfmake, html);
+  for (const [i, part] of pages.entries()) {
+    const blocks = pageBlocks(htmlToPdfmake, part.html);
     fitToPage(blocks);
-    content.push(i ? { stack: blocks, pageBreak: 'before' } : { stack: blocks });
-    if (i % 20 === 19) await new Promise(r => setTimeout(r));   // let the page breathe on long files
+    content.push(i && part.first ? { stack: blocks, pageBreak: 'before' } : { stack: blocks });
+    if (i % 10 === 9) onStep(`PDF qurulur ${Math.round(((i + 1) / pages.length) * 100)}%`);
+    await new Promise(r => setTimeout(r));   // let the page breathe on long files
   }
   const title = String(file.name || 'sened').replace(/\.[^.]+$/, '');
   const def = {
@@ -112,11 +123,31 @@ export async function wordToPdf(file, onStep = () => {}) {
     pageSize: 'A4',
     pageMargins: [52, 50, 52, 54],
     defaultStyle: { font: 'Roboto', fontSize: 10.5, lineHeight: 1.25, color: '#1f2d36' },
-    footer: (page, count) => ({ text: `${page} / ${count}`, alignment: 'center', fontSize: 8, color: '#8a9ba8', margin: [0, 18, 0, 0] }),
     content
   };
+  onStep('PDF səhifələri düzülür');
+  return inWorker(def, onStep).catch((e) => {
+    // a very old browser without module workers: build it here instead
+    if (!/worker/i.test(e?.message || '')) throw e;
+    def.footer = (page, count) => ({ text: `${page} / ${count}`, alignment: 'center', fontSize: 8, color: '#8a9ba8', margin: [0, 18, 0, 0] });
+    return new Promise((resolve, reject) => {
+      try { pdfMake.createPdf(def).getBlob(b => resolve(new Blob([b], { type: 'application/pdf' }))); }
+      catch (err) { reject(err); }
+    });
+  });
+}
+
+function inWorker(def, onStep) {
   return new Promise((resolve, reject) => {
-    try { pdfMake.createPdf(def).getBlob(b => resolve(new Blob([b], { type: 'application/pdf' }))); }
-    catch (e) { reject(e); }
+    let w;
+    try { w = new Worker(new URL('./pdfWorker.js', import.meta.url), { type: 'module' }); }
+    catch (e) { reject(new Error(`worker: ${e.message}`)); return; }
+    w.onmessage = ({ data }) => {
+      if (data.progress !== undefined) onStep(`PDF yazılır ${Math.round(data.progress * 100)}%`);
+      else if (data.done) { w.terminate(); resolve(new Blob([data.done], { type: 'application/pdf' })); }
+      else if (data.error) { w.terminate(); reject(new Error(data.error)); }
+    };
+    w.onerror = (e) => { w.terminate(); reject(new Error(`worker: ${e.message || 'PDF qurulmadı'}`)); };
+    w.postMessage({ def });
   });
 }

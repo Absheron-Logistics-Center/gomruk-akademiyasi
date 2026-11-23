@@ -35,6 +35,8 @@ const q=x=>String(x||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace
 const child=(node,name)=>Array.from(node?.children||[]).find(c=>c.namespaceURI===W&&c.localName===name)||null;
 const children=(node,name)=>Array.from(node?.children||[]).filter(c=>c.namespaceURI===W&&c.localName===name);
 const val=node=>node?.getAttributeNS(W,'val')||node?.getAttribute('w:val')||node?.getAttribute('val')||'';
+// parts of Word XML the reader never uses; removing them first makes big files much quicker to read
+function slimXml(t){return t.replace(/\s(?:w:rsid\w*|w14:paraId|w14:textId)="[^"]*"/g,'').replace(/<w:(?:proofErr|lang|noProof|bookmarkStart|bookmarkEnd|rFonts)\b[^>]*\/>/g,'')}
 function xml(src,label){const p=new DOMParser().parseFromString(src,'application/xml');if(p.querySelector('parsererror'))throw Error(label+' sənədinin Word XML məzmunu oxunmadı');return p}
 function redColor(run){const pr=child(run,'rPr'),c=child(pr,'color'),hex=(val(c)||'').replace('#','');if(!/^[a-fA-F0-9]{6}$/.test(hex))return false;const r=parseInt(hex.slice(0,2),16),g=parseInt(hex.slice(2,4),16),b=parseInt(hex.slice(4,6),16);return r>=140&&r>g*1.42&&r>b*1.30&&r-g>=65}
 function runText(run){const out=[];function walk(n){for(const c of Array.from(n?.children||[])){if(c.namespaceURI===W){if(['t','delText','instrText'].includes(c.localName)){if(c.localName==='t')out.push(c.textContent||'')}else if(c.localName==='tab')out.push('  ');else if(c.localName==='br'||c.localName==='cr')out.push(c.getAttributeNS(W,'type')==='page'?'\f':'\n');else if(c.localName==='lastRenderedPageBreak')out.push('\f');else if(c.localName==='noBreakHyphen')out.push('‑');else if(c.localName==='softHyphen')out.push('\u00ad');else if(c.localName!=='drawing'&&c.localName!=='pict')walk(c)}else walk(c)}}walk(run);return out.join('')}
@@ -54,6 +56,8 @@ async function fromDocx(file){
  const dir=main.includes('/')?main.slice(0,main.lastIndexOf('/')+1):'';
  let word=await ztext(main);if(!word&&main!=='word/document.xml'){main='word/document.xml';word=await ztext(main)}
  if(!word){const any=(za.list()).find(n=>/^word\/document[^/]*\.xml$/i.test(n));if(any){main=any;word=await ztext(any)}}
+ // drop what is never shown (edit ids, spelling marks, font and language tags): long files read several times faster
+ if(word)word=slimXml(word);
  if(!word)throw Error('Bu fayl etibarlı .docx Word sənədi deyil');
  const root=xml(word,'Word');let body=root.getElementsByTagNameNS(W,'body')[0];
  if(!body){

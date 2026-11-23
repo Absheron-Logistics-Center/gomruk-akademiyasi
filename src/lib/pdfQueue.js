@@ -49,7 +49,7 @@ async function run() {
           const blob = await loadDoc(job.doc);
           file = new File([blob], job.doc.name);
         }
-        const pdf = await wordToPdf(file, set);
+        const pdf = await wordToPdf(file, set, job.doc.id);
         set('PDF saxlanılır');
         const name = `${job.doc.name.replace(/\.[^.]+$/, '')}.pdf`;
         const up = await uploadPieces(pdf, name, p => set(`PDF saxlanılır ${Math.round(p * 100)}%`));

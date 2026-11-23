@@ -819,3 +819,9 @@ input.vpage {
 .test-page .test-head { box-shadow: 0 -10px 0 var(--desk); }
 .test-cancel { margin-left: auto; }
 .test-cancel:hover, .test-cancel-side:hover { color: var(--danger); border-color: rgba(220, 38, 38, 0.35); background: var(--danger-soft); }
+/* long lesson names wrap to a second line in the top bar */
+.bar-where { align-items: center; }
+.bar-where h1 {
+  white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; line-height: 1.25; font-size: 15.5px; overflow-wrap: anywhere;
+}
