@@ -587,3 +587,31 @@ input.page-input {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* ---------- Word → PDF in the background ---------- */
+.pdf-status {
+  position: fixed; left: 16px; bottom: 16px; z-index: 300; width: min(360px, calc(100vw - 32px));
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  box-shadow: var(--sh-lg); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+  animation: pop-in 0.22s var(--ease); font-size: 12.5px;
+}
+.pdf-status-head { display: flex; align-items: center; gap: 8px; color: var(--primary); }
+.pdf-status-head strong { flex: 1; color: var(--text-primary); font-size: 13px; }
+.pdf-status-head button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 5px; color: var(--text-muted); }
+.pdf-status-head button:hover { background: var(--bg-soft); }
+.pdf-status .good { color: var(--good); }
+.pdf-status .bad { color: var(--danger); }
+.pdf-status-line { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); min-width: 0; }
+.pdf-status-line span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pdf-status-line em { font-style: normal; color: var(--text-muted); white-space: nowrap; }
+.pdf-status-line.bad span { color: var(--danger); }
+.pdf-status-line button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 5px; color: var(--primary); }
+.pdf-status-line button:hover { background: var(--primary-soft); }
+.pdf-banner {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 12.5px;
+  color: var(--primary-dark); background: var(--primary-soft); border-bottom: 1px solid var(--primary-lighter);
+}
+.pdf-banner span { flex: 1; }
+.pdf-banner.bad { color: var(--danger); background: var(--danger-soft); border-bottom-color: rgba(220, 38, 38, 0.2); }
+.pdf-banner button { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; color: inherit; padding: 3px 8px; border-radius: 5px; }
+.pdf-banner button:hover { background: rgba(255, 255, 255, 0.6); }

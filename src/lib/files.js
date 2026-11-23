@@ -21,11 +21,11 @@ export function fmtSize(n) {
 }
 
 /* ------------------------------ upload ------------------------------ */
-// target: { owner, section: 'original'|'explanation'|'test-source', replace? }
-export async function uploadFile(file, target, onProgress) {
-  if (file.size > MAX_FILE) throw new Error(`${file.name}: faylın həcmi 95 MB-dan böyükdür.`);
-  if (!file.size) throw new Error(`${file.name}: fayl boşdur.`);
-  const { uploadId, partSize, parts } = await api.startUpload(file.name, file.size);
+// send a file in 3 MB pieces; returns { uploadId, parts, size }
+export async function uploadPieces(file, name, onProgress) {
+  if (file.size > MAX_FILE) throw new Error(`${name}: faylın həcmi 95 MB-dan böyükdür.`);
+  if (!file.size) throw new Error(`${name}: fayl boşdur.`);
+  const { uploadId, partSize, parts } = await api.startUpload(name, file.size);
   let sent = 0;
   onProgress?.(0);
   for (let n = 0; n < parts; n++) {
@@ -38,6 +38,12 @@ export async function uploadFile(file, target, onProgress) {
     sent += blob.size;
     onProgress?.(sent / file.size);
   }
+  return { uploadId, parts, size: file.size };
+}
+
+// target: { owner, section: 'original'|'explanation'|'test-source', replace? }
+export async function uploadFile(file, target, onProgress) {
+  const { uploadId, parts } = await uploadPieces(file, file.name, onProgress);
   const doc = await api.finishUpload(uploadId, { name: file.name, size: file.size, parts, ...target });
   // the file we just sent is the file: keep it so it opens without downloading
   cachePut(doc.id, file).catch(() => {});
@@ -46,29 +52,31 @@ export async function uploadFile(file, target, onProgress) {
 
 /* ------------------------------ download ------------------------------ */
 const inflight = new Map();
-export function loadDoc(doc, onProgress) {
-  if (inflight.has(doc.id)) return inflight.get(doc.id);
+// variant 'pdf': the PDF copy made from a Word document
+export function loadDoc(doc, onProgress, variant) {
+  const key = variant ? `${doc.id}:${variant}` : doc.id;
+  if (inflight.has(key)) return inflight.get(key);
   const p = (async () => {
-    const cached = await cacheGet(doc.id).catch(() => null);
+    const cached = await cacheGet(key).catch(() => null);
     if (cached) { onProgress?.(1); return cached; }
-    const meta = await api.fileMeta(doc.id);
+    const meta = await api.fileMeta(doc.id, variant);
     const parts = Math.max(1, Math.ceil(meta.size / meta.partSize));
     const chunks = [];
     let got = 0;
     for (let n = 0; n < parts; n++) {
-      const res = await api.filePart(doc.id, n);
+      const res = await api.filePart(doc.id, n, undefined, variant);
       const b = await res.arrayBuffer();
       chunks.push(b);
       got += b.byteLength;
       onProgress?.(Math.min(1, got / meta.size));
     }
-    const blob = new Blob(chunks, { type: meta.mime || 'application/octet-stream' });
+    const blob = new Blob(chunks, { type: variant === 'pdf' ? 'application/pdf' : (meta.mime || 'application/octet-stream') });
     if (blob.size !== meta.size) throw new Error('Sənəd tam yüklənmədi. Yenidən cəhd edin.');
-    cachePut(doc.id, blob).catch(() => {});
+    cachePut(key, blob).catch(() => {});
     return blob;
   })();
-  inflight.set(doc.id, p);
-  p.finally(() => inflight.delete(doc.id));
+  inflight.set(key, p);
+  p.finally(() => inflight.delete(key));
   return p;
 }
 
@@ -109,7 +117,7 @@ async function cacheGet(id) {
   tx('readwrite', s => s.put({ ...rec, at: Date.now() }, id)).catch(() => {});
   return rec.blob;
 }
-async function cachePut(id, blob) {
+export async function cachePut(id, blob) {
   if (blob.size > CACHE_LIMIT / 4) return;
   await tx('readwrite', s => s.put({ blob, size: blob.size, at: Date.now() }, id));
   // keep the cache under its limit: drop the least recently opened

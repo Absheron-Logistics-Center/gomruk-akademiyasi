@@ -7,6 +7,7 @@ import { Modal, Progress, useUi } from './ui.jsx';
 import { api } from '../lib/api.js';
 import { DOC_ACCEPT, TEST_ACCEPT, fmtSize, extOf, uploadFile, stem } from '../lib/files.js';
 import { createLesson, readTestBank, attachTests } from '../lib/ops.js';
+import { queuePdf } from '../lib/pdfQueue.js';
 
 const DOC_RE = /\.(pdf|doc|docx|docm|dot|dotx|dotm|rtf|odt|ott|xml|txt)$/i;
 const TEST_RE = /\.(doc|docx|docm|dot|dotx|dotm|rtf|odt|ott|xml|txt)$/i;
@@ -79,14 +80,14 @@ export default function AddDialog({ kind, edit, catalog, onClose, onDone }) {
           let i = 0; const total = originals.reduce((a, f) => a + f.size, 0) || 1; let done = 0;
           for (const f of originals) {
             setProg({ label: f.name, value: done / total });
-            await uploadFile(f, { owner: edit.owner, section: 'original', ...(edit.replace && i === 0 ? { replace: edit.replace.id } : {}) },
-              p => setProg({ label: f.name, value: (done + p * f.size) / total }));
+            queuePdf(await uploadFile(f, { owner: edit.owner, section: 'original', ...(edit.replace && i === 0 ? { replace: edit.replace.id } : {}) },
+              p => setProg({ label: f.name, value: (done + p * f.size) / total })), f);
             done += f.size; i++;
           }
           toast(edit.replace ? 'Sənəd dəyişdirildi.' : `${originals.length} sənəd əlavə edildi.`);
         } else if (section === 'explanation') {
           if (!explanation) throw new Error('Faylı seçin.');
-          await uploadFile(explanation, { owner: edit.owner, section: 'explanation' }, p => setProg({ label: explanation.name, value: p }));
+          queuePdf(await uploadFile(explanation, { owner: edit.owner, section: 'explanation' }, p => setProg({ label: explanation.name, value: p })), explanation);
           toast('İzahlı material yadda saxlanıldı.');
         } else {
           if (!test || !bank?.questions) throw new Error('Word test faylını seçin.');
@@ -191,8 +192,8 @@ export default function AddDialog({ kind, edit, catalog, onClose, onDone }) {
         )}
         {(showOriginals || showExplanation) && !exam && (
           <div className="note-box soft">
-            PDF sənədin əsl görünüşünü saxlayır. Word faylı brauzerdə sadələşdirilmiş görünüşlə açılır; orijinalı istənilən vaxt endirmək olar.
-            Köhnə .doc və .rtf fayllarından yalnız mətn oxunur.
+            Word faylları yükləndikdən sonra arxa planda avtomatik PDF-ə çevrilir və saytda PDF kimi göstərilir; Word orijinalı endirmək üçün qalır.
+            Köhnə .doc və .rtf fayllarından yalnız mətn götürülür.
           </div>
         )}
 

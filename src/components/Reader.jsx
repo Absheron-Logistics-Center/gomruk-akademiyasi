@@ -1,13 +1,15 @@
-// Reader.jsx — opens a stored document. PDF in the browser's own PDF viewer,
-// Word / RTF / ODT / old .doc as a readable page with search, pages and zoom.
+// Reader.jsx — opens a stored document in the browser's own PDF viewer.
+// A Word file is shown as its PDF copy (made automatically in the background);
+// until that copy exists it is shown as a readable page with search, pages and zoom.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize2, Download, ExternalLink, Search, MoveHorizontal,
-  Loader2, AlertTriangle, ChevronUp, ChevronDown, X, RotateCw
+  Loader2, AlertTriangle, ChevronUp, ChevronDown, X, RotateCw, FileDown
 } from 'lucide-react';
 import { Progress } from './ui.jsx';
 import { loadDoc, saveBlob, isPdf, fmtSize } from '../lib/files.js';
 import { GACompat } from '../lib/gaParse.js';
+import { queuePdf, subscribe, retryPdf } from '../lib/pdfQueue.js';
 
 const READER_CSS = `
   mark.ga-hit{background:#fde68a;color:inherit;border-radius:2px;padding:0 1px}
@@ -22,16 +24,21 @@ export default function Reader({ doc, label, extra }) {
   const [attempt, setAttempt] = useState(0);
   const panel = useRef(null);
 
+  // a Word file with a PDF copy opens as the PDF
+  const variant = !isPdf(doc.name) && doc.pdf ? 'pdf' : undefined;
   useEffect(() => {
     let alive = true;
     setBlob(null); setErr(''); setProgress(0);
-    loadDoc(doc, p => alive && setProgress(p))
+    loadDoc(doc, p => alive && setProgress(p), variant)
       .then(b => { if (alive) setBlob(b); })
       .catch(e => { if (alive) setErr(e.message); });
     return () => { alive = false; };
-  }, [doc.id, attempt]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [doc.id, variant, doc.pdf?.key, attempt]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const pdf = isPdf(doc.name);
+  // a Word file without a PDF copy yet: make one in the background
+  useEffect(() => { if (!isPdf(doc.name) && !doc.pdf) queuePdf(doc); }, [doc.id, doc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pdf = isPdf(doc.name) || variant === 'pdf';
   const fullscreen = () => {
     const el = panel.current;
     if (!el) return;
@@ -52,11 +59,11 @@ export default function Reader({ doc, label, extra }) {
         <div className="reader-state">
           <Loader2 size={22} className="spin" />
           <strong>{label} yüklənir</strong>
-          <span>{doc.name} · {fmtSize(doc.size)}</span>
+          <span>{doc.name} · {fmtSize(variant ? doc.pdf.size : doc.size)}</span>
           <div className="reader-progress"><Progress value={progress} /></div>
         </div>
       ) : pdf ? (
-        <PdfView blob={blob} doc={doc} onFull={fullscreen} extra={extra} />
+        <PdfView blob={blob} doc={doc} onFull={fullscreen} extra={extra} fromWord={!!variant} />
       ) : (
         <WordView blob={blob} doc={doc} onFull={fullscreen} extra={extra} />
       )}
@@ -75,7 +82,13 @@ function useObjectUrl(blob, type) {
 }
 
 /* ------------------------------ PDF ------------------------------ */
-function PdfView({ blob, doc, onFull, extra }) {
+function PdfView({ blob, doc, onFull, extra, fromWord }) {
+  const pdfName = fromWord ? `${doc.name.replace(/\.[^.]+$/, '')}.pdf` : doc.name;
+  const [gettingWord, setGettingWord] = useState(false);
+  const downloadWord = async () => {
+    setGettingWord(true);
+    try { saveBlob(await loadDoc(doc), doc.name); } catch { /* shown by the browser */ } finally { setGettingWord(false); }
+  };
   const url = useObjectUrl(blob, 'application/pdf');
   const [page, setPage] = useState(1);
   const [pageText, setPageText] = useState('1');
@@ -93,7 +106,7 @@ function PdfView({ blob, doc, onFull, extra }) {
   return (
     <>
       <div className="reader-bar">
-        <div className="reader-name" title={doc.name}><span className="ftype pdf">PDF</span><span>{doc.name}</span></div>
+        <div className="reader-name" title={pdfName}><span className="ftype pdf">PDF</span><span>{pdfName}</span></div>
         <div className="tool-group">
           <button className="tool" onClick={() => goPage(page - 1)} disabled={page <= 1} title="Əvvəlki səhifə"><ChevronLeft size={16} /></button>
           <input className="page-input" value={pageText} inputMode="numeric" aria-label="Səhifə"
@@ -110,17 +123,37 @@ function PdfView({ blob, doc, onFull, extra }) {
         <div className="tool-group">
           <button className="tool" onClick={onFull} title="Tam ekran"><Maximize2 size={16} /></button>
           <a className="tool" href={url || undefined} target="_blank" rel="noopener" title="Yeni pəncərədə aç"><ExternalLink size={16} /></a>
-          <button className="tool" onClick={() => saveBlob(blob, doc.name)} title="Endir"><Download size={16} /></button>
+          <button className="tool" onClick={() => saveBlob(blob, pdfName)} title="PDF-i endir"><Download size={16} /></button>
+          {fromWord && (
+            <button className="tool" onClick={downloadWord} disabled={gettingWord} title="Word orijinalını endir">
+              {gettingWord ? <Loader2 size={16} className="spin" /> : <FileDown size={16} />}
+            </button>
+          )}
         </div>
         {extra}
       </div>
-      <iframe ref={frame} className="reader-frame" title={doc.name} src={src} />
-      <div className="reader-note">PDF görüntüsü rəngləri, cədvəlləri və tərtibatı olduğu kimi saxlayır. Mətndə axtarmaq üçün sənədin üzərinə klikləyib Ctrl+F basın.</div>
+      <iframe ref={frame} className="reader-frame" title={pdfName} src={src} />
+      <div className="reader-note">{fromWord
+        ? 'Word faylından avtomatik yaradılmış PDF. Word orijinalını endirmək üçün yuxarıdakı ikinci endirmə düyməsini seçin. Mətndə axtarmaq üçün Ctrl+F.'
+        : 'PDF görüntüsü rəngləri, cədvəlləri və tərtibatı olduğu kimi saxlayır. Mətndə axtarmaq üçün sənədin üzərinə klikləyib Ctrl+F basın.'}</div>
     </>
   );
 }
 
 /* ------------------------------ Word and others ------------------------------ */
+function PdfProgress({ doc }) {
+  const [job, setJob] = useState(null);
+  useEffect(() => subscribe(list => setJob(list.find(j => j.id === doc.id) || null)), [doc.id]);
+  if (!job || job.state === 'done') return null;
+  return (
+    <div className={`pdf-banner ${job.state === 'failed' ? 'bad' : ''}`}>
+      {job.state === 'failed'
+        ? <><AlertTriangle size={14} /><span>PDF yaradılmadı: {job.error}</span><button onClick={() => retryPdf(doc.id)}><RotateCw size={13} />Yenidən</button></>
+        : <><Loader2 size={14} className="spin" /><span>PDF hazırlanır{job.step ? `: ${job.step}` : ''}. Hazır olanda bu sənəd özü PDF kimi açılacaq.</span></>}
+    </div>
+  );
+}
+
 function WordView({ blob, doc, onFull, extra }) {
   const [parsed, setParsed] = useState(null);
   const [err, setErr] = useState('');
@@ -286,6 +319,7 @@ function WordView({ blob, doc, onFull, extra }) {
         </div>
         {extra}
       </div>
+      <PdfProgress doc={doc} />
       <iframe ref={frame} className="reader-frame word" title={doc.name} sandbox="allow-same-origin" srcDoc={html} onLoad={onLoad} />
       <div className="reader-note">Word sənədinin brauzerdə sadələşdirilmiş görünüşüdür. Orijinal rəng, qrafik və tərtibat üçün faylı endirin.</div>
     </>

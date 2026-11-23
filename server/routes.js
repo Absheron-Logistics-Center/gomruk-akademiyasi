@@ -65,6 +65,7 @@ const piecesOf = (d) => d.parts || Math.max(1, Math.ceil((d.size || 0) / PART));
 async function dropDoc(doc) {
   if (!doc?.id) return;
   await deletePieces(doc.key || doc.id, piecesOf(doc), doc.urls).catch(() => {});
+  if (doc.pdf?.key) await deletePieces(doc.pdf.key, doc.pdf.parts, doc.pdf.urls).catch(() => {});
 }
 
 /* ------------------------------ read ------------------------------ */
@@ -223,15 +224,8 @@ router.put('/uploads/:id/:n',
   })
 );
 
-//   body: { name, size, parts, owner: lessonId|examId, section: 'original'|'explanation'|'test-source', replace?: docId }
-router.post('/uploads/:id/finish', wrap(async (req, res) => {
-  const { id } = req.params;
-  if (!/^u[a-z0-9]+$/i.test(id)) throw err(400, 'Yanlış yükləmə.');
-  const b = req.body || {};
-  const name = String(b.name || '').slice(0, 250);
-  const ext = extOf(name);
-  if (!DOC_EXT.has(ext)) throw err(400, `Bu fayl növü qəbul edilmir: .${ext}`);
-  const parts = Math.max(1, Math.min(40, Number(b.parts) || 1));
+// every piece of an upload arrived, in full
+async function collectUpload(id, parts, size) {
   let total = 0, head = '';
   const urls = [];
   for (let i = 0; i < parts; i++) {
@@ -241,7 +235,20 @@ router.post('/uploads/:id/finish', wrap(async (req, res) => {
     if (p.url) urls.push(p.url);
     if (i === 0) head = p.head || '';
   }
-  if (Number(b.size) && total !== Number(b.size)) throw err(400, 'Fayl tam yüklənmədi. Yenidən cəhd edin.');
+  if (Number(size) && total !== Number(size)) throw err(400, 'Fayl tam yüklənmədi. Yenidən cəhd edin.');
+  return { total, head, urls };
+}
+
+//   body: { name, size, parts, owner: lessonId|examId, section: 'original'|'explanation'|'test-source', replace?: docId }
+router.post('/uploads/:id/finish', wrap(async (req, res) => {
+  const { id } = req.params;
+  if (!/^u[a-z0-9]+$/i.test(id)) throw err(400, 'Yanlış yükləmə.');
+  const b = req.body || {};
+  const name = String(b.name || '').slice(0, 250);
+  const ext = extOf(name);
+  if (!DOC_EXT.has(ext)) throw err(400, `Bu fayl növü qəbul edilmir: .${ext}`);
+  const parts = Math.max(1, Math.min(40, Number(b.parts) || 1));
+  const { total, head, urls } = await collectUpload(id, parts, b.size);
   if (ext === 'pdf' && !head.startsWith('%PDF-')) {
     await deletePieces(id, parts, urls);
     throw err(400, 'Bu fayl etibarlı PDF deyil.');
@@ -279,6 +286,37 @@ router.post('/uploads/:id/finish', wrap(async (req, res) => {
   res.status(201).json(doc);
 }));
 
+/* ------------------------------ PDF copy of a Word document ------------------------------ */
+// The browser turns a Word file into a PDF and uploads it in pieces like any
+// file; this attaches it to the Word document. The site then shows the PDF,
+// the Word original stays for download.
+//   body: { uploadId, parts, size }
+router.post('/files/:docId/pdf', wrap(async (req, res) => {
+  const docId = req.params.docId;
+  const id = String(req.body?.uploadId || '');
+  if (!/^u[a-z0-9]+$/i.test(id)) throw err(400, 'Yanlış yükləmə.');
+  const parts = Math.max(1, Math.min(40, Number(req.body?.parts) || 1));
+  const { total, head, urls } = await collectUpload(id, parts, req.body?.size);
+  if (!head.startsWith('%PDF-')) { await deletePieces(id, parts, urls); throw err(400, 'PDF düzgün yaranmadı.'); }
+  for (let i = 0; i < parts; i++) await deleteJson(`up/${id}/${i}`).catch(() => {});
+  const pdf = { key: id, parts, size: total, ...(urls.length === parts ? { urls } : {}), madeAt: new Date().toISOString() };
+  let old = null, found = false;
+  await updateCatalog(c => {
+    old = null; found = false;
+    for (const o of [...c.lessons, ...c.exams]) {
+      for (const d of docsOf(o)) {
+        if (d.id !== docId) continue;
+        found = true;
+        old = d.pdf || null;
+        d.pdf = pdf;
+      }
+    }
+  });
+  if (!found) { await deletePieces(id, parts, urls); throw err(404, 'Sənəd tapılmadı.'); }
+  if (old?.key && old.key !== id) await deletePieces(old.key, old.parts, old.urls).catch(() => {});
+  res.json({ ok: true, size: total });
+}));
+
 /* ------------------------------ downloads in parts ------------------------------ */
 async function findDoc(docId) {
   const c = await readCatalog();
@@ -287,17 +325,25 @@ async function findDoc(docId) {
   }
   return null;
 }
+// ?v=pdf: the PDF copy of a Word document
+function variant(d, v) {
+  if (v !== 'pdf') return d;
+  if (!d.pdf) throw err(404, 'Bu sənədin PDF nüsxəsi hələ yoxdur.');
+  return { ...d.pdf, id: d.id, name: `${String(d.name).replace(/\.[^.]+$/, '')}.pdf`, ext: 'pdf' };
+}
 
 router.get('/files/:docId/meta', wrap(async (req, res) => {
-  const d = await findDoc(req.params.docId);
-  if (!d) throw err(404, 'Sənəd tapılmadı.');
-  const { urls: _hidden, ...pub } = d;   // storage addresses stay on the server
+  const found = await findDoc(req.params.docId);
+  if (!found) throw err(404, 'Sənəd tapılmadı.');
+  const d = variant(found, req.query.v);
+  const { urls: _hidden, pdf: _pdf, ...pub } = d;   // storage addresses stay on the server
   res.json({ ...pub, partSize: PART, mime: MIME[d.ext] || 'application/octet-stream' });
 }));
 
 router.get('/files/:docId', wrap(async (req, res) => {
-  const d = await findDoc(req.params.docId);
-  if (!d) throw err(404, 'Sənəd tapılmadı.');
+  const found = await findDoc(req.params.docId);
+  if (!found) throw err(404, 'Sənəd tapılmadı.');
+  const d = variant(found, req.query.v);
   const part = Math.max(0, Math.floor(Number(req.query.part) || 0));
   if (part >= piecesOf(d)) throw err(404, 'Belə hissə yoxdur.');
   const buf = await getPiece(d.key || d.id, part, d.urls?.[part]);

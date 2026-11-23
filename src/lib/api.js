@@ -63,6 +63,7 @@ export const api = {
   startUpload: (name, size) => call('POST', '/api/gomruk/uploads', { name, size }),
   uploadPart: (uploadId, n, blob) => call('PUT', `/api/gomruk/uploads/${uploadId}/${n}`, blob),
   finishUpload: (uploadId, body) => call('POST', `/api/gomruk/uploads/${uploadId}/finish`, body),
-  fileMeta: (docId) => call('GET', `/api/gomruk/files/${encodeURIComponent(docId)}/meta`),
-  filePart: (docId, n, signal) => call('GET', `/api/gomruk/files/${encodeURIComponent(docId)}?part=${n}`, undefined, { raw: true, signal })
+  fileMeta: (docId, v) => call('GET', `/api/gomruk/files/${encodeURIComponent(docId)}/meta${v ? `?v=${v}` : ''}`),
+  filePart: (docId, n, signal, v) => call('GET', `/api/gomruk/files/${encodeURIComponent(docId)}?part=${n}${v ? `&v=${v}` : ''}`, undefined, { raw: true, signal }),
+  attachPdf: (docId, body) => call('POST', `/api/gomruk/files/${encodeURIComponent(docId)}/pdf`, body)
 };

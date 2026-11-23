@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { uploadFile, extOf } from './files.js';
 import { GAWord, GACompat } from './gaParse.js';
 import { problemOf } from './tests.js';
+import { queuePdf } from './pdfQueue.js';
 
 // Read a Word test bank in the browser; nothing is sent until it reads well.
 export async function readTestBank(file) {
@@ -41,13 +42,13 @@ export async function createLesson(input, step = () => {}) {
   const lesson = await api.addLesson(input.title);
   const errors = [];
   for (const f of input.originals) {
-    try { await uploadFile(f, { owner: lesson.id, section: 'original' }, track(f)); }
+    try { queuePdf(await uploadFile(f, { owner: lesson.id, section: 'original' }, track(f)), f); }
     catch (e) { errors.push(`${f.name}: ${e.message}`); }
     done += f.size;
   }
   if (input.explanation) {
     const f = input.explanation;
-    try { await uploadFile(f, { owner: lesson.id, section: 'explanation' }, track(f)); }
+    try { queuePdf(await uploadFile(f, { owner: lesson.id, section: 'explanation' }, track(f)), f); }
     catch (e) { errors.push(`${f.name}: ${e.message}`); }
     done += f.size;
   }

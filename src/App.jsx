@@ -6,6 +6,7 @@ import LessonPage from './components/LessonPage.jsx';
 import ExamPage from './components/ExamPage.jsx';
 import { useUi } from './components/ui.jsx';
 import { go } from './lib/nav.js';
+import PdfStatus from './components/PdfStatus.jsx';
 
 // #/                     lessons
 // #/ders/<id>/<tab>      a lesson (tab: original | izah | test)
@@ -56,6 +57,13 @@ export default function App() {
     }
   }, []);
 
+  // a Word file got its PDF: show it
+  useEffect(() => {
+    const on = () => reload();
+    window.addEventListener('ga:changed', on);
+    return () => window.removeEventListener('ga:changed', on);
+  }, [reload]);
+
   useEffect(() => {
     if (!user) return;
     reload();
@@ -69,7 +77,9 @@ export default function App() {
   if (!user) return <Login onLogin={u => { setUser(u); toast(`Xoş gəldiniz, ${u.name}`); }} />;
 
   const common = { user, catalog, reload, logout, font, setFont, loadError };
-  if (route.page === 'lesson') return <LessonPage key={route.id} {...common} id={route.id} tab={route.tab} />;
-  if (route.page === 'exam') return <ExamPage key={route.id} {...common} id={route.id} />;
-  return <Home {...common} />;
+  let page;
+  if (route.page === 'lesson') page = <LessonPage key={route.id} {...common} id={route.id} tab={route.tab} />;
+  else if (route.page === 'exam') page = <ExamPage key={route.id} {...common} id={route.id} />;
+  else page = <Home {...common} />;
+  return <>{page}<PdfStatus /></>;
 }

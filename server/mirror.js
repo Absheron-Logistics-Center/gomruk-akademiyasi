@@ -46,12 +46,13 @@ export function startMirror({ site, password, dataDir, every = 60 }) {
     throw new Error('Sayta daxil olmaq olmadı.');
   }
 
-  async function download(doc, cacheFile) {
+  // v: 'pdf' for the PDF copy of a Word document
+  async function download(doc, cacheFile, v) {
     const have = await exists(cacheFile);
     if (have && have.size === doc.size) return false;
     const parts = doc.parts || Math.max(1, Math.ceil(doc.size / (3 * 1024 * 1024)));
     const bufs = [];
-    for (let n = 0; n < parts; n++) bufs.push(await call(`/api/gomruk/files/${encodeURIComponent(doc.id)}?part=${n}`, { raw: true }));
+    for (let n = 0; n < parts; n++) bufs.push(await call(`/api/gomruk/files/${encodeURIComponent(doc.id)}?part=${n}${v ? `&v=${v}` : ''}`, { raw: true }));
     const buf = Buffer.concat(bufs);
     if (buf.length !== doc.size) throw new Error(`${doc.name}: tam yüklənmədi`);
     await fs.mkdir(path.dirname(cacheFile), { recursive: true });
@@ -99,6 +100,17 @@ export function startMirror({ site, password, dataDir, every = 60 }) {
       if (!t || t.size !== doc.size) {
         await fs.mkdir(folder, { recursive: true });
         await fs.copyFile(cacheFile, target);
+      }
+      // a Word file's PDF copy sits next to it
+      if (doc.pdf && doc.ext !== 'pdf') {
+        const pdfCache = path.join(cache, `${doc.id}.copy.pdf`);
+        keepCache.add(pdfCache);
+        if (await download({ ...doc, ...doc.pdf, name: doc.name }, pdfCache, 'pdf')) downloaded++;
+        let pdfTarget = path.join(folder, clean(`${doc.name.replace(/\.[^.]+$/, '')}.pdf`, 150));
+        if (keepTree.has(pdfTarget)) pdfTarget = path.join(folder, `${doc.id}-${clean(`${doc.name.replace(/\.[^.]+$/, '')}.pdf`, 140)}`);
+        keepTree.add(pdfTarget);
+        const pt = await exists(pdfTarget);
+        if (!pt || pt.size !== doc.pdf.size) await fs.copyFile(pdfCache, pdfTarget);
       }
     };
     const placeTests = async (owner, folder) => {
