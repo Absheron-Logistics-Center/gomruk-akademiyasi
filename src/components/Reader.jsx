@@ -20,8 +20,8 @@ const READER_CSS = `
   mark.ga-hit.cur{background:#f59e0b;color:#fff;box-shadow:0 0 0 2px rgba(245,158,11,.35)}
   body{transition:none}
   ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:transparent}
-  ::-webkit-scrollbar-thumb{background:#cfdae0;border-radius:10px;border:3px solid transparent;background-clip:content-box}
-  ::-webkit-scrollbar-thumb:hover{background-color:#a9bcc6}::-webkit-scrollbar-button{display:none;width:0;height:0}
+  ::-webkit-scrollbar-thumb{background:#b9c9d2;border-radius:10px;border:3px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background-color:#94abb8}::-webkit-scrollbar-button{display:none;width:0;height:0}
 `;
 const ZOOMS = [50, 75, 100, 125, 150, 200, 300];
 const readPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === '1'; } catch { return d; } };
@@ -559,7 +559,7 @@ function useFrameFind(docOf, ready) {
     const seen = new Set();
     for (const el of blocks) {
       if (found.length >= 3000) break;
-      if (el.querySelector('p, li, td, th')) continue;            // only the innermost text blocks
+      if (el.querySelector('p, li, td, th') || el.closest('.ga-thumbs')) continue;   // innermost text blocks, not the page thumbnails
       const walker = d.createTreeWalker(el, NodeFilter.SHOW_TEXT);
       const parts = []; let text = '';
       while (walker.nextNode()) {
@@ -635,12 +635,21 @@ function useFrameFind(docOf, ready) {
 }
 
 /* ------------------------------ Word, in its own layout ------------------------------ */
+const THUMBS_W = 150;
 const DOCX_FRAME = '<!doctype html><html><head><meta charset="utf-8"></head><body></body></html>';
 const DOCX_LOOK = `
   html,body{margin:0;background:#e9eef1}
   .docx-wrapper>section.docx{display:flex;flex-direction:column}
   .docx-wrapper>section.docx>article{flex:none}
   .docx-wrapper>section.docx>footer{margin-top:auto}
+  .ga-thumbs{position:fixed;left:0;top:0;bottom:0;width:${THUMBS_W}px;box-sizing:border-box;overflow-y:auto;background:#f6f8fa;border-right:1px solid #dbe4e9;padding:16px 0 24px;display:none;flex-direction:column;align-items:center;gap:14px;z-index:5}
+  body.thumbs-open{padding-left:${THUMBS_W}px}
+  body.thumbs-open .ga-thumbs{display:flex}
+  .ga-thumb{display:flex;flex-direction:column;align-items:center;gap:6px;border:0;background:none;cursor:pointer;padding:0;font:500 11.5px Inter,system-ui,sans-serif;color:#8a9ba8;flex-shrink:0}
+  .ga-thumb-img{display:block;position:relative;overflow:hidden;background:#fff;border:1px solid #dbe4e9;outline:2.5px solid transparent;outline-offset:2px;transition:outline-color .12s}
+  .ga-thumb:hover .ga-thumb-img{outline-color:#9fc2d3}
+  .ga-thumb.on .ga-thumb-img{outline-color:#3a7894}
+  .ga-thumb.on{color:#2c5d75;font-weight:650}
   .docx-wrapper{background:transparent!important;padding:24px 24px 40px!important;display:flex;flex-flow:column;align-items:center;width:max-content;min-width:100%;box-sizing:border-box;transform-origin:0 0}
   .docx-wrapper>section.docx{box-shadow:0 1px 3px rgba(20,60,80,.1),0 10px 30px rgba(20,60,80,.08)!important;margin:0 0 16px!important;flex-shrink:0}
   ${READER_CSS}
@@ -649,6 +658,7 @@ const DOCX_LOOK = `
     html,body{background:#fff!important}
     .docx-wrapper{padding:0!important;zoom:1!important;background:none!important;display:block!important;width:auto!important}
     .docx-wrapper>section.docx{box-shadow:none!important;margin:0!important;break-after:page}
+    .ga-thumbs{display:none!important}body{padding-left:0!important}
     mark.ga-hit{background:none!important;color:inherit!important;box-shadow:none!important}
   }
 `;
@@ -663,8 +673,10 @@ function DocxView({ blob, doc, bar, onFail }) {
   const [pages, setPages] = useState(1);
   const [page, setPage] = useState(1);
   const [pageText, setPageText] = useState('1');
+  const [thumbs, setThumbs] = useState(() => readPref('ga.thumbs', window.innerWidth > 1100));
   const docOf = () => frame.current?.contentDocument || null;
   const find = useFrameFind(docOf, ready);
+  const toggleThumbs = () => setThumbs(t => { writePref('ga.thumbs', !t); return !t; });
 
   async function onLoad() {
     const d = docOf();
@@ -703,7 +715,58 @@ function DocxView({ blob, doc, bar, onFail }) {
     return () => ro.disconnect();
   }, []);
 
-  const scale = fit && pageW ? Math.max(0.3, Math.min(3, Math.min(940, frameW - 64) / pageW)) : zoom / 100;
+  const room = frameW - (thumbs && frameW > 700 ? THUMBS_W : 0);
+  const scale = fit && pageW ? Math.max(0.3, Math.min(3, Math.min(940, room - 64) / pageW)) : zoom / 100;
+  const goRef = useRef(null);
+
+  // page thumbnails: a column inside the document frame, each drawn when it comes into view
+  useEffect(() => {
+    const d = docOf();
+    if (!ready || !d || d.querySelector('.ga-thumbs')) return;
+    const aside = d.createElement('aside');
+    aside.className = 'ga-thumbs';
+    const secs = [...d.querySelectorAll('.docx-wrapper > section.docx')];
+    const io = new d.defaultView.IntersectionObserver((list) => {
+      for (const e of list) {
+        if (!e.isIntersecting || e.target.dataset.drawn) continue;
+        const i = Number(e.target.dataset.i), src = secs[i];
+        if (!src) continue;
+        e.target.dataset.drawn = '1';
+        const w = src.offsetWidth, k = THUMB_W / w;
+        const copy = src.cloneNode(true);
+        copy.style.cssText += `;margin:0!important;box-shadow:none!important;background:#fff;transform:scale(${k});transform-origin:0 0;width:${w}px;pointer-events:none`;
+        copy.querySelectorAll('mark.ga-hit').forEach(m => m.replaceWith(...m.childNodes));
+        e.target.querySelector('.ga-thumb-img').appendChild(copy);
+      }
+    }, { root: aside, rootMargin: '600px 0px' });
+    secs.forEach((sec, i) => {
+      const b = d.createElement('button');
+      b.className = 'ga-thumb'; b.dataset.i = String(i); b.type = 'button';
+      const img = d.createElement('span');
+      img.className = 'ga-thumb-img';
+      img.style.width = `${THUMB_W}px`;
+      img.style.height = `${Math.round(THUMB_W * sec.offsetHeight / Math.max(1, sec.offsetWidth))}px`;
+      const n = d.createElement('span');
+      n.textContent = String(i + 1);
+      b.append(img, n);
+      b.addEventListener('click', () => goRef.current?.(i + 1));
+      aside.appendChild(b);
+      io.observe(b);
+    });
+    d.body.appendChild(aside);
+    return () => io.disconnect();
+  }, [ready]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { docOf()?.body?.classList.toggle('thumbs-open', thumbs && frameW > 700); }, [thumbs, ready, frameW]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const aside = docOf()?.querySelector('.ga-thumbs');
+    if (!aside) return;
+    aside.querySelectorAll('.ga-thumb.on').forEach(b => b.classList.remove('on'));
+    const cur = aside.children[page - 1];
+    if (!cur) return;
+    cur.classList.add('on');
+    const top = cur.offsetTop, bottom = top + cur.offsetHeight;
+    if (top < aside.scrollTop + 8 || bottom > aside.scrollTop + aside.clientHeight - 8) aside.scrollTop = top - aside.clientHeight / 3;
+  }, [page, ready, thumbs]);   // eslint-disable-line react-hooks/exhaustive-deps
   const shown = Math.round(scale * 100);
   useEffect(() => {
     const w = docOf()?.querySelector('.docx-wrapper');
@@ -715,6 +778,7 @@ function DocxView({ blob, doc, bar, onFail }) {
     setPage(v); setPageText(String(v));
     docOf()?.querySelectorAll('.docx-wrapper > section.docx')[v - 1]?.scrollIntoView({ block: 'start' });
   };
+  goRef.current = goPage;
   const zoomTo = (z) => { setFit(false); setZoom(Math.max(25, Math.min(400, Math.round(z)))); };
   const zoomStep = (dir) => {
     const next = dir > 0 ? ZOOMS.find(z => z > shown + 1) ?? Math.min(400, shown + 50) : [...ZOOMS].reverse().find(z => z < shown - 1) ?? Math.max(25, shown - 25);
@@ -739,7 +803,7 @@ function DocxView({ blob, doc, bar, onFail }) {
           </Drop>
         )}
       </>}>
-        <></>
+        <><button className={`vb ${thumbs ? 'on' : ''}`} onClick={toggleThumbs} title="Səhifələr"><PanelLeft size={17} /></button><span className="vsep" /></>
         <span className="vsep" />
         <div className="vgroup">
           <button className="vb" onClick={() => goPage(page - 1)} disabled={page <= 1} title="Əvvəlki səhifə"><ChevronUp size={17} /></button>
