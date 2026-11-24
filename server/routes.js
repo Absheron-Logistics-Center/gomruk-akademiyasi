@@ -23,6 +23,7 @@ const MIME = {
   xml: 'application/xml'
 };
 
+
 const uid = (p) => `${p}${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`;
 const who = (req) => req.user?.name || req.user?.username || null;
 const err = (status, message) => Object.assign(new Error(message), { status });
