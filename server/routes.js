@@ -4,6 +4,7 @@
 import express, { Router } from 'express';
 import crypto from 'crypto';
 import { getJson, putJson, deleteJson, updateJson, putPiece, getPiece, deletePieces } from './store.js';
+import { wordToPdf, storePdf } from './msword.js';
 
 const router = Router();
 const CATALOG = 'catalog';
@@ -21,7 +22,6 @@ const MIME = {
   odt: 'application/vnd.oasis.opendocument.text',
   txt: 'text/plain; charset=utf-8',
   xml: 'application/xml'
-  
 };
 
 const uid = (p) => `${p}${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`;
@@ -340,6 +340,12 @@ async function attachCopy(req, res, kind) {
   if (kind === 'layout') copy.v = String(req.body?.v || '').slice(0, 20);
   // made by Microsoft Word (or LibreOffice) on the company server: looks exactly like the Word file
   if (kind === 'pdf' && ['word', 'libreoffice'].includes(req.body?.engine)) copy.engine = req.body.engine;
+  if (!(await setCopy(docId, kind, copy))) { await deletePieces(id, parts, urls); throw err(404, 'Sənəd tapılmadı.'); }
+  res.json({ ok: true, size: total });
+}
+
+// put a copy (pdf / layout) on a document; the copy it replaces is deleted
+async function setCopy(docId, kind, copy) {
   let old = null, found = false;
   await updateCatalog(c => {
     old = null; found = false;
@@ -352,10 +358,45 @@ async function attachCopy(req, res, kind) {
       }
     }
   });
-  if (!found) { await deletePieces(id, parts, urls); throw err(404, 'Sənəd tapılmadı.'); }
-  if (old?.key && old.key !== id) await deletePieces(old.key, old.parts, old.urls).catch(() => {});
-  res.json({ ok: true, size: total });
+  if (found && old?.key && old.key !== copy.key) await deletePieces(old.key, old.parts, old.urls).catch(() => {});
+  return found;
 }
+
+/* ------------------------------ exact PDF of a Word document, made by Microsoft ------------------------------ */
+// Done once per document, on Vercel. Two people opening the same new file at the same
+// moment: the second one waits for the first one's PDF.
+const EXACT = ['msword', 'word', 'libreoffice'];
+router.post('/files/:docId/make-pdf', wrap(async (req, res) => {
+  const docId = req.params.docId;
+  let d = await findDoc(docId);
+  if (!d) throw err(404, 'Sənəd tapılmadı.');
+  if (d.ext === 'pdf') throw err(400, 'Bu artıq PDF-dir.');
+  if (EXACT.includes(d.pdf?.engine) && !req.body?.again) return res.json({ ok: true, pdf: publicCopy(d.pdf) });
+  const lock = `ms/lock/${docId}`;
+  const me = crypto.randomBytes(6).toString('hex');
+  const held = (await getJson(lock))?.content;
+  if (held && held.until > Date.now()) {
+    for (let i = 0; i < 25; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      d = await findDoc(docId);
+      if (EXACT.includes(d?.pdf?.engine)) return res.json({ ok: true, pdf: publicCopy(d.pdf) });
+    }
+    throw err(503, 'PDF hələ hazırlanır. Bir az sonra yenidən açın.');
+  }
+  await putJson(lock, { me, until: Date.now() + 70000 }, { ttlSec: 80 });
+  try {
+    const pdf = await wordToPdf(docId, await readWhole(d), d.ext);
+    const copy = await storePdf(pdf);
+    if (!(await setCopy(docId, 'pdf', copy))) { await deletePieces(copy.key, copy.parts, copy.urls); throw err(404, 'Sənəd silinib.'); }
+    res.json({ ok: true, pdf: publicCopy(copy) });
+  } catch (e) {
+    if (e.need) return res.status(e.status || 409).json({ error: e.message, need: e.need });
+    throw e;
+  } finally {
+    if ((await getJson(lock))?.content?.me === me) await deleteJson(lock).catch(() => {});
+  }
+}));
+const publicCopy = ({ urls: _u, ...c }) => c;
 
 /* ------------------------------ downloads in parts ------------------------------ */
 export async function findDoc(docId) {

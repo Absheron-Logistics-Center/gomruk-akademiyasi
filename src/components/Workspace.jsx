@@ -2,7 +2,8 @@
 // the left, a slim top bar (where you are, Orijinal / İzah / Test, account)
 // and the page itself on the right. On a phone the list opens from the menu button.
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, Plus, FolderUp, Pencil, Trash2, X, Menu, LogOut, ChevronLeft, ChevronRight, BookOpen } from 'lucide-react';
+import { Search, Plus, FolderUp, Pencil, Trash2, X, Menu, LogOut, ChevronLeft, ChevronRight, BookOpen, FileCheck2 } from 'lucide-react';
+import MsDialog from './MsDialog.jsx';
 import AddDialog from './AddDialog.jsx';
 import FolderImport from './FolderImport.jsx';
 import { useUi } from './ui.jsx';
@@ -31,6 +32,7 @@ export default function Workspace({ active, kicker, title, seg, nav, fill, child
   const [drag, setDrag] = useState(null);
   const [order, setOrder] = useState(null);
   const [menu, setMenu] = useState(false);
+  const [msOpen, setMsOpen] = useState(false);
   const listRef = useRef(null);
 
   useEffect(() => { setDrawer(false); }, [active?.type, active?.id, active?.tab]);
@@ -164,6 +166,7 @@ export default function Workspace({ active, kicker, title, seg, nav, fill, child
           {menu && (
             <div className="acct-menu">
               <div className="acct-name"><span className="avatar sm">{initials(user?.name)}</span><span>{user?.name}</span></div>
+              <button className="plain" onClick={() => { setMenu(false); setMsOpen(true); }}><FileCheck2 size={15} />Microsoft hesabı (Word → PDF)</button>
               <button onClick={() => { setMenu(false); logout(); }}><LogOut size={15} />Çıxış</button>
             </div>
           )}
@@ -243,6 +246,7 @@ export default function Workspace({ active, kicker, title, seg, nav, fill, child
 
       {adding && <AddDialog kind="lesson" catalog={catalog} onClose={() => setAdding(false)}
         onDone={async (res) => { setAdding(false); await reload(); if (res?.go) go(res.go); }} />}
+      {msOpen && <MsDialog catalog={catalog} onClose={() => setMsOpen(false)} />}
       {folderOpen && <FolderImport catalog={catalog} onClose={() => setFolderOpen(false)} onDone={async () => { await reload(); }} />}
     </div>
   );

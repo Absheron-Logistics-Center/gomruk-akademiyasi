@@ -69,5 +69,9 @@ export const api = {
   filePart: (docId, n, signal, v) => call('GET', `/api/gomruk/files/${encodeURIComponent(docId)}?part=${n}${v ? `&v=${v}` : ''}`, undefined, { raw: true, signal }),
   attachPdf: (docId, body) => call('POST', `/api/gomruk/files/${encodeURIComponent(docId)}/pdf`, body),
   share: (docId) => call('GET', `/api/gomruk/files/${encodeURIComponent(docId)}/share`),
-  attachLayout: (docId, body) => call('POST', `/api/gomruk/files/${encodeURIComponent(docId)}/layout`, body)
+  attachLayout: (docId, body) => call('POST', `/api/gomruk/files/${encodeURIComponent(docId)}/layout`, body),
+  makePdf: (docId, again) => call('POST', `/api/gomruk/files/${encodeURIComponent(docId)}/make-pdf`, again ? { again: true } : {}),
+  msStatus: () => call('GET', '/api/gomruk/ms'),
+  msLogin: () => call('GET', '/api/gomruk/ms/login'),
+  msDisconnect: () => call('DELETE', '/api/gomruk/ms')
 };

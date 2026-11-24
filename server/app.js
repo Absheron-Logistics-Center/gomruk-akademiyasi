@@ -9,6 +9,7 @@ import routes, { findDoc, readWhole, firstBytes, OPEN_MAX, MIME } from './routes
 import fs from 'fs';
 import path from 'path';
 import { dataDir, storageProblem, useRedis, useBlob } from './store.js';
+import { msConfigured, redirectUri, loginUrl, connect, account, disconnect } from './msword.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -122,6 +123,36 @@ app.get('/api/open/:docId/:exp/:sig/:name', async (req, res, next) => {
     res.setHeader('Cache-Control', 'private, max-age=3600');
     res.end(buf);
   } catch (e) { next(e); }
+});
+
+// The Microsoft account that turns Word files into exact PDFs (see msword.js)
+app.get('/api/gomruk/ms', requireAuth, async (req, res, next) => {
+  try {
+    res.json({ configured: msConfigured(), account: msConfigured() ? await account() : null, redirect: redirectUri(req) });
+  } catch (e) { next(e); }
+});
+app.get('/api/gomruk/ms/login', requireAuth, (req, res) => {
+  if (!msConfigured()) return res.status(400).json({ error: 'Vercel-də MS_CLIENT_ID və MS_CLIENT_SECRET yazılmayıb.' });
+  const body = b64(JSON.stringify({ exp: Date.now() + 15 * 60e3, n: crypto.randomBytes(6).toString('hex') }));
+  res.json({ url: loginUrl(redirectUri(req), `${body}.${sign(`ms:${body}`)}`) });
+});
+app.delete('/api/gomruk/ms', requireAuth, async (_req, res, next) => {
+  try { await disconnect(); res.json({ ok: true }); } catch (e) { next(e); }
+});
+app.get('/api/ms/callback', async (req, res) => {
+  const back = (q) => res.redirect(`/#/?ms=${q}`);
+  try {
+    const [body, mac] = String(req.query.state || '').split('.');
+    const want = body ? sign(`ms:${body}`) : '';
+    if (!body || !mac || want.length !== mac.length || !crypto.timingSafeEqual(Buffer.from(want), Buffer.from(mac))) return back('bad');
+    if (!(JSON.parse(Buffer.from(body, 'base64url').toString('utf8')).exp > Date.now())) return back('bad');
+    if (req.query.error || !req.query.code) return back('no');
+    await connect(String(req.query.code), redirectUri(req));
+    back('ok');
+  } catch (e) {
+    console.error('[ms]', e);
+    back('fail');
+  }
 });
 
 app.use('/api/gomruk', requireAuth, routes);

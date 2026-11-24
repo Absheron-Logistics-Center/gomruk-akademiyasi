@@ -15,9 +15,10 @@ import { parseDoc } from '../lib/docCache.js';
 import { addLook, LAYOUT_V, canSaveLayout, pack, unpack, layOut, pageText as textOfPage, isComputer } from '../lib/docxLayout.js';
 import { api } from '../lib/api.js';
 import { uploadPieces, cachePut } from '../lib/files.js';
+import { hasExactPdf, makePdf, msStatus, msReadyNow } from '../lib/pdfQueue.js';
 
-// PDFs made by Microsoft Word (or LibreOffice) on the company server look exactly like the Word file
-export const isExactPdf = (doc) => ['word', 'libreoffice'].includes(doc?.pdf?.engine);
+// PDFs made by Microsoft (Word for the web, on the server) look exactly like the Word file
+export const isExactPdf = hasExactPdf;
 
 const READER_CSS = `
   mark.ga-hit{background:#fde68a;color:inherit;border-radius:2px;padding:0 1px}
@@ -42,8 +43,12 @@ export default function Reader({ doc, label, fileSlot, actions }) {
   const exact = word && isExactPdf(doc);
   // office: Microsoft's own Word viewer shows the file exactly as Word does (files up to 4.4 MB)
   const ownLayout = () => (doc.layout?.v === LAYOUT_V && canSaveLayout() ? 'saved' : 'docx');
-  const first = () => (!word ? 'pdf' : exact ? 'pdfcopy' : (doc.size || 0) <= OFFICE_MAX ? 'office' : ownLayout());
+  // making: Microsoft turns the Word file into its exact PDF (once per file, then it opens at once)
+  const fallback = () => ((doc.size || 0) <= OFFICE_MAX ? 'office' : ownLayout());
+  const first = () => (!word ? 'pdf' : exact ? 'pdfcopy' : msReadyNow() === false ? fallback() : 'making');
   const [mode, setMode] = useState(first);
+  const [made, setMade] = useState(null);   // the PDF just made, until the lesson list has it
+  const pdoc = made && !exact ? { ...doc, pdf: made } : doc;
   const [blob, setBlob] = useState(null);
   const [err, setErr] = useState('');
   const [progress, setProgress] = useState(0);
@@ -51,7 +56,19 @@ export default function Reader({ doc, label, fileSlot, actions }) {
   const [full, setFull] = useState(false);
   const panel = useRef(null);
 
-  useEffect(() => { setMode(first()); }, [doc.id]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setMade(null); setMode(first()); }, [doc.id]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (mode !== 'making') return;
+    let alive = true;
+    msStatus().then(st => {
+      if (!alive) return;
+      if (!st.ready) { setMode(fallback()); return; }
+      makePdf(doc)
+        .then(pdf => { if (alive) { setMade(pdf); setMode('pdfcopy'); } })
+        .catch(() => { if (alive) setMode(fallback()); });
+    });
+    return () => { alive = false; };
+  }, [mode, doc.id]);   // eslint-disable-line react-hooks/exhaustive-deps
   // the PDF copy became ready while the plain view was showing
   useEffect(() => { if (exact && mode !== 'pdfcopy') setMode('pdfcopy'); }, [doc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -59,12 +76,12 @@ export default function Reader({ doc, label, fileSlot, actions }) {
   useEffect(() => {
     let alive = true;
     setBlob(null); setErr(''); setProgress(0);
-    if (mode === 'office') return () => { alive = false; };   // Microsoft's viewer fetches the file itself
-    loadDoc(doc, p => alive && setProgress(p), variant)
+    if (mode === 'office' || mode === 'making') return () => { alive = false; };   // nothing to load yet
+    loadDoc(pdoc, p => alive && setProgress(p), variant)
       .then(b => { if (alive) setBlob(b); })
       .catch(e => { if (alive) setErr(e.message); });
     return () => { alive = false; };
-  }, [doc.id, variant, attempt, mode === 'office']);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [doc.id, variant, attempt, mode === 'office' || mode === 'making', pdoc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // the Word layout could not be shown: use the PDF copy, or the plain view and make a copy
   const layoutFailed = useCallback(() => {
@@ -86,7 +103,16 @@ export default function Reader({ doc, label, fileSlot, actions }) {
 
   return (
     <div className="viewer" ref={panel}>
-      {mode === 'office' ? (
+      {mode === 'making' ? (
+        <>
+          <Bar {...bar} />
+          <div className="viewer-state">
+            <Loader2 size={22} className="spin" />
+            <strong>Sənəd hazırlanır</strong>
+            <span>Word faylı PDF-ə çevrilir. Bu yalnız ilk açılışda olur, sonra dərhal açılacaq.</span>
+          </div>
+        </>
+      ) : mode === 'office' ? (
         <OfficeView key={doc.id} doc={doc} bar={bar} onFail={() => setMode(ownLayout())} />
       ) : err ? (
         <>
@@ -104,12 +130,12 @@ export default function Reader({ doc, label, fileSlot, actions }) {
           <div className="viewer-state">
             <Loader2 size={22} className="spin" />
             <strong>{label} yüklənir</strong>
-            <span>{doc.name} · {fmtSize(variant ? doc[variant].size : doc.size)}</span>
+            <span>{doc.name} · {fmtSize(variant ? pdoc[variant]?.size : doc.size)}</span>
             <div className="viewer-progress"><Progress value={progress} /></div>
           </div>
         </>
       ) : mode === 'pdf' || mode === 'pdfcopy' ? (
-        <PdfView blob={blob} doc={doc} fromWord={mode === 'pdfcopy'} bar={bar} />
+        <PdfView blob={blob} doc={pdoc} fromWord={mode === 'pdfcopy'} bar={bar} />
       ) : mode === 'docx' || mode === 'saved' ? (
         <DocxView key={`${doc.id}:${mode}`} blob={blob} saved={mode === 'saved'} doc={doc} bar={bar}
           onFail={mode === 'saved' ? () => setMode('docx') : layoutFailed} />
@@ -701,7 +727,7 @@ function OfficeView({ doc, bar, onFail }) {
                 {slow && <button className="btn small" onClick={onFail}><FileText size={14} />Açılmırsa: saytın öz görünüşü</button>}
               </div>
             )}
-            {viewer && <iframe className="word-frame office-frame" title={doc.name} src={viewer} onLoad={() => setLoaded(true)} allow="fullscreen" />}
+            {viewer && <iframe className="word-frame office-frame" title={doc.name} src={viewer} onLoad={() => setTimeout(() => setLoaded(true), 3500)} allow="fullscreen" />}
           </>
         )}
       </div>

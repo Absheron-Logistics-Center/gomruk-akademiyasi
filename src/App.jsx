@@ -7,6 +7,7 @@ import ExamPage from './components/ExamPage.jsx';
 import { useUi } from './components/ui.jsx';
 import { go } from './lib/nav.js';
 import PdfStatus from './components/PdfStatus.jsx';
+import { msStatus, queueAll, waitingDocs } from './lib/pdfQueue.js';
 
 // #/                     lessons
 // #/ders/<id>/<tab>      a lesson (tab: original | izah | test)
@@ -37,6 +38,23 @@ export default function App() {
     return () => window.removeEventListener('hashchange', on);
   }, []);
 
+
+  // back from the Microsoft sign-in (see MsDialog): make the PDFs of every Word file now
+  const [msBack] = useState(() => (/[?&]ms=(\w+)/.exec(location.hash) || [])[1] || '');
+  useEffect(() => {
+    if (!msBack) return;
+    history.replaceState(null, '', location.pathname + location.search);
+    if (msBack !== 'ok') toast(msBack === 'no' ? 'Microsoft girişi ləğv edildi.' : 'Microsoft hesabı qoşulmadı. Yenidən cəhd edin.', 'error');
+  }, [msBack]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (msBack !== 'ok' || !catalog) return;
+    msStatus(true).then(s => {
+      if (!s.ready) return;
+      const left = waitingDocs(catalog);
+      toast(left.length ? `Microsoft hesabı qoşuldu. ${left.length} Word faylı PDF-ə çevrilir.` : 'Microsoft hesabı qoşuldu.');
+      if (left.length) queueAll(left);
+    });
+  }, [msBack, !!catalog]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const logout = useCallback(() => { clearSession(); setUser(null); setCatalog(null); go('/'); }, []);
   useEffect(() => { setOnExpired(() => { clearSession(); setUser(null); }); }, []);
