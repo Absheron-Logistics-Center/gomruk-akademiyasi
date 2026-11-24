@@ -325,36 +325,25 @@ export const DOCX_LOOK = `
 `;
 
 /* ---------- ready layouts: laid out once, opened at once ever after ---------- */
-// change this when the way pages are laid out changes, so old saved layouts are made again
-export const LAYOUT_V = 'L2';
+// A layout is the document's styles plus every page as its own piece of HTML with its size.
+// The viewer puts only the pages near the screen into the page, so even a 200-page law
+// uses little memory.
+export const LAYOUT_V = 'L3';
 export const canSaveLayout = () => typeof CompressionStream === 'function' && typeof DecompressionStream === 'function';
 
-// the laid-out pages of the frame, packed small
-export async function snapshot(d) {
-  // the viewer's own look is not saved: the current one is added when the pages are opened
-  const look = d.getElementById('ga-look');
-  look?.remove();
-  const json = JSON.stringify({ v: LAYOUT_V, head: d.head.innerHTML, body: d.body.innerHTML });
-  if (look) d.head.appendChild(look);
-  const gz = new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'));
+export async function pack(data) {
+  const gz = new Blob([JSON.stringify(data)]).stream().pipeThrough(new CompressionStream('gzip'));
   return new Response(gz).blob();
 }
-
-// put saved pages into the frame; false when the copy cannot be used
-export async function restore(d, blob) {
+export async function unpack(blob) {
   try {
-    const text = await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).text();
-    const saved = JSON.parse(text);
-    if (saved.v !== LAYOUT_V || !saved.body) return false;
-    d.head.innerHTML = saved.head;
-    addLook(d);
-    d.body.innerHTML = saved.body;
-    return !!d.querySelector('.docx-wrapper > section.docx');
-  } catch { return false; }
+    const data = JSON.parse(await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).text());
+    return data?.v === LAYOUT_V && Array.isArray(data.pages) && data.pages.length ? data : null;
+  } catch { return null; }
 }
 
-// lay a Word file out in a hidden frame (right after it is uploaded) and pack the pages
-export async function makeLayout(blob) {
+// lay a Word file out once in a hidden frame and take it apart into pages
+export async function layOut(blob) {
   const f = document.createElement('iframe');
   f.setAttribute('aria-hidden', 'true');
   f.style.cssText = 'position:fixed;left:-20000px;top:0;width:1200px;height:900px;border:0;visibility:hidden;pointer-events:none';
@@ -368,12 +357,30 @@ export async function makeLayout(blob) {
     addLook(d);
     if (!d.querySelector('.docx-wrapper > section.docx') || !(d.body.textContent || '').trim()) throw new Error('Sənəddə mətn yoxdur');
     paginate(d);
-    return await snapshot(d);
+    d.getElementById('ga-look')?.remove();
+    const secs = [...d.querySelectorAll('.docx-wrapper > section.docx')];
+    addLook(d);
+    const sizes = secs.map(x => [x.offsetWidth, x.offsetHeight]);
+    d.getElementById('ga-look')?.remove();
+    return {
+      v: LAYOUT_V,
+      head: d.head.innerHTML,
+      pages: secs.map((x, i) => ({ w: sizes[i][0], h: sizes[i][1], html: x.outerHTML }))
+    };
   } finally {
+    try { f.contentDocument.body.replaceChildren(); f.contentDocument.head.replaceChildren(); } catch { /* gone */ }
+    f.src = 'about:blank';
     f.remove();
   }
 }
-// layouts are saved only from a computer: its fonts are the ones Word uses
+
+// the plain text of one page, for searching
+export function pageText(html) {
+  return html.replace(/<(style|script)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+    .toLocaleLowerCase('az');
+}
+
 export const isComputer = () => !!window.matchMedia?.('(pointer: fine)').matches && window.innerWidth >= 900;
 
 export function addLook(d) {

@@ -12,8 +12,7 @@ import Drop from './Drop.jsx';
 import '../styles/pdf-text.css';
 import { loadDoc, saveBlob, isPdf, fmtSize } from '../lib/files.js';
 import { parseDoc } from '../lib/docCache.js';
-import { noteActivity } from '../lib/pdfQueue.js';
-import { renderDocx, paginate, addLook, LAYOUT_V, canSaveLayout, snapshot, restore, isComputer } from '../lib/docxLayout.js';
+import { addLook, LAYOUT_V, canSaveLayout, pack, unpack, layOut, pageText as textOfPage, isComputer } from '../lib/docxLayout.js';
 import { api } from '../lib/api.js';
 import { uploadPieces, cachePut } from '../lib/files.js';
 
@@ -657,14 +656,15 @@ function useFrameFind(docOf, ready) {
 }
 
 /* ------------------------------ Word, in its own layout ------------------------------ */
-// The first opening lays the pages out and saves them, so every later opening (by anyone)
-// is instant. Only a computer saves it: its fonts are the ones Word uses.
+// The first opening lays the pages out (once) and saves them, so every later opening, by
+// anyone, is instant. Only the pages near the screen are put into the page: a long law
+// stays light. Only a computer saves the layout: its fonts are the ones Word uses.
 const saving = new Set();
-async function saveLayout(d, doc) {
+async function saveLayout(data, doc) {
   if (!canSaveLayout() || saving.has(doc.id) || doc.layout?.v === LAYOUT_V || !isComputer()) return;
   saving.add(doc.id);
   try {
-    const gz = await snapshot(d);
+    const gz = await pack(data);
     const up = await uploadPieces(gz, `${doc.name.replace(/\.[^.]+$/, '')}.html.gz`);
     await api.attachLayout(doc.id, { ...up, v: LAYOUT_V });
     cachePut(`${doc.id}:layout:${up.uploadId}`, gz).catch(() => {});
@@ -672,13 +672,57 @@ async function saveLayout(d, doc) {
   } catch { saving.delete(doc.id); }
 }
 
+// mark every place where the words appear inside one element; returns groups of marks
+function markIn(d, root, needle) {
+  const found = [];
+  const blocks = [...root.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, th')].filter(el => !el.querySelector('p, li, td, th'));
+  const seen = new Set();
+  for (const el of blocks) {
+    const walker = d.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const parts = []; let text = '';
+    while (walker.nextNode()) {
+      const n = walker.currentNode;
+      if (seen.has(n)) continue; seen.add(n);
+      const low = n.nodeValue.toLocaleLowerCase('az');
+      if (low.length !== n.nodeValue.length) continue;
+      parts.push({ n, at: text.length }); text += low;
+    }
+    if (!text) continue;
+    const starts = [];
+    for (let i = text.indexOf(needle); i >= 0; i = text.indexOf(needle, i + needle.length)) starts.push(i);
+    const here = [];
+    for (let k = starts.length - 1; k >= 0; k--) {
+      const s0 = starts[k], e0 = s0 + needle.length, group = [];
+      for (let j = parts.length - 1; j >= 0; j--) {
+        const { n, at } = parts[j], end = at + n.nodeValue.length;
+        if (end <= s0 || at >= e0) continue;
+        const a = Math.max(0, s0 - at), b = Math.min(n.nodeValue.length, e0 - at);
+        if (b < n.nodeValue.length) n.splitText(b);
+        const mid = a > 0 ? n.splitText(a) : n;
+        const m = d.createElement('mark');
+        m.className = 'ga-hit';
+        mid.parentNode.replaceChild(m, mid);
+        m.appendChild(mid);
+        group.unshift(m);
+      }
+      if (group.length) here.unshift(group);
+    }
+    found.push(...here);
+  }
+  return found;
+}
+
 const THUMBS_W = 150;
 const DOCX_FRAME = '<!doctype html><html><head><meta charset="utf-8"></head><body></body></html>';
 
-
 function DocxView({ blob, saved, doc, bar, onFail }) {
   const frame = useRef(null);
+  const lay = useRef(null);             // { head, pages: [{ w, h, html }] }
+  const slots = useRef([]);             // the element now standing for each page
+  const io = useRef(null);
+  const printing = useRef(false);
   const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState('Sənəd hazırlanır');
   const [pageW, setPageW] = useState(0);
   const [frameW, setFrameW] = useState(0);
   const [fit, setFit] = useState(true);
@@ -688,43 +732,87 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
   const [pageText, setPageText] = useState('1');
   const [thumbs, setThumbs] = useState(() => readPref('ga.thumbs', window.innerWidth > 1100));
   const docOf = () => frame.current?.contentDocument || null;
-  const find = useFrameFind(docOf, ready);
   const toggleThumbs = () => setThumbs(t => { writePref('ga.thumbs', !t); return !t; });
+
+  // a page in the page, or only its empty frame of the same size
+  const placeholder = (d, i) => {
+    const p = lay.current.pages[i];
+    const el = d.createElement('section');
+    el.className = 'docx ga-ph';
+    el.dataset.i = String(i);
+    el.style.cssText = `width:${p.w}px;height:${p.h}px;min-height:0;padding:0;box-sizing:border-box`;
+    return el;
+  };
+  const show = (i) => {
+    const d = docOf(), cur = slots.current[i];
+    if (!d || !cur || !cur.classList.contains('ga-ph')) return cur;
+    const t = d.createElement('template');
+    t.innerHTML = lay.current.pages[i].html;
+    const el = t.content.firstElementChild;
+    if (!el) return cur;
+    el.dataset.i = String(i);
+    cur.replaceWith(el);
+    io.current?.unobserve(cur); io.current?.observe(el);
+    slots.current[i] = el;
+    return el;
+  };
+  const hide = (i) => {
+    const d = docOf(), cur = slots.current[i];
+    if (!d || !cur || cur.classList.contains('ga-ph') || printing.current) return;
+    const el = placeholder(d, i);
+    cur.replaceWith(el);
+    io.current?.unobserve(cur); io.current?.observe(el);
+    slots.current[i] = el;
+  };
 
   async function onLoad() {
     const d = docOf();
     if (!d || d.body.dataset.done) return;
     d.body.dataset.done = '1';
     try {
-      if (saved) {
-        // the ready layout: the pages exactly as they were laid out the first time
-        if (!await restore(d, blob)) throw new Error('köhnə');
-        setPages(d.querySelectorAll('.docx-wrapper > section.docx').length);
-      } else {
-        await renderDocx(blob, d.body, d.head);
-        // the page look goes last, after the document's own styles
-        addLook(d);
-        const all = d.querySelectorAll('.docx-wrapper > section.docx');
-        if (!all.length || !(d.body.textContent || '').trim()) throw new Error('boş');
-        setPages(paginate(d) || all.length);
-        saveLayout(d, doc);
+      let data = saved ? await unpack(blob) : null;
+      if (!data) {
+        if (saved) throw new Error('köhnə');
+        setBusy('Səhifələr hazırlanır');
+        data = await layOut(blob);
+        saveLayout(data, doc);
       }
+      lay.current = data;
+      d.head.innerHTML = data.head;
+      addLook(d);
+      const wrap = d.createElement('div');
+      wrap.className = 'docx-wrapper';
+      slots.current = data.pages.map((_, i) => placeholder(d, i));
+      wrap.append(...slots.current);
+      d.body.appendChild(wrap);
+      io.current = new d.defaultView.IntersectionObserver((list) => {
+        for (const e of list) {
+          const i = Number(e.target.dataset.i);
+          if (e.isIntersecting) show(i); else hide(i);
+        }
+      }, { rootMargin: '1400px 0px' });
+      slots.current.forEach(el => io.current.observe(el));
+      setPages(data.pages.length);
       // fit to the widest page, so landscape pages are never cut off
-      setPageW(Math.max(...[...d.querySelectorAll('.docx-wrapper > section.docx')].map(x => x.getBoundingClientRect().width)));
+      setPageW(Math.max(...data.pages.map(p => p.w)));
       d.addEventListener('scroll', track, { passive: true });
       setReady(true);
     } catch {
       onFail();
     }
   }
+  useEffect(() => () => io.current?.disconnect(), []);
+  let ticking = false;
   function track() {
-    noteActivity();
-    const d = docOf();
-    if (!d) return;
-    const limit = (frame.current?.clientHeight || 600) * 0.35;
-    let cur = 1;
-    d.querySelectorAll('.docx-wrapper > section.docx').forEach((s, i) => { if (s.getBoundingClientRect().top < limit) cur = i + 1; });
-    setPage(p => { if (p !== cur) setPageText(String(cur)); return cur; });
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      ticking = false;
+      const limit = (frame.current?.clientHeight || 600) * 0.35;
+      let cur = 1;
+      for (let i = 0; i < slots.current.length; i++) { if (slots.current[i].getBoundingClientRect().top < limit) cur = i + 1; else break; }
+      setPage(p => { if (p !== cur) setPageText(String(cur)); return cur; });
+    });
   }
 
   useEffect(() => {
@@ -739,42 +827,54 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
   const scale = fit && pageW ? Math.max(0.3, Math.min(3, Math.min(940, room - 64) / pageW)) : zoom / 100;
   const goRef = useRef(null);
 
-  // page thumbnails: a column inside the document frame, each drawn when it comes into view
+  // page thumbnails: small copies of the pages near the thumbnail view, a few at a time
   useEffect(() => {
     const d = docOf();
     if (!ready || !d || d.querySelector('.ga-thumbs')) return;
     const aside = d.createElement('aside');
     aside.className = 'ga-thumbs';
-    const secs = [...d.querySelectorAll('.docx-wrapper > section.docx')];
-    const io = new d.defaultView.IntersectionObserver((list) => {
+    const P = lay.current.pages;
+    const drawn = [];
+    const clear = (b) => { b.querySelector('.ga-thumb-img').replaceChildren(); delete b.dataset.drawn; };
+    const tio = new d.defaultView.IntersectionObserver((list) => {
       for (const e of list) {
-        if (!e.isIntersecting || e.target.dataset.drawn) continue;
-        const i = Number(e.target.dataset.i), src = secs[i];
-        if (!src) continue;
+        if (!e.isIntersecting) {
+          if (e.target.dataset.drawn) { clear(e.target); drawn.splice(drawn.indexOf(e.target), 1); }
+          continue;
+        }
+        if (e.target.dataset.drawn) continue;
+        const i = Number(e.target.dataset.i);
         e.target.dataset.drawn = '1';
-        const w = src.offsetWidth, k = THUMB_W / w;
-        const copy = src.cloneNode(true);
-        copy.style.cssText += `;margin:0!important;box-shadow:none!important;background:#fff;transform:scale(${k});transform-origin:0 0;width:${w}px;pointer-events:none`;
-        copy.querySelectorAll('mark.ga-hit').forEach(m => m.replaceWith(...m.childNodes));
+        drawn.push(e.target);
+        while (drawn.length > 14) {
+          let far = 0;
+          drawn.forEach((b, j) => { if (Math.abs(Number(b.dataset.i) - i) > Math.abs(Number(drawn[far].dataset.i) - i)) far = j; });
+          clear(drawn[far]); drawn.splice(far, 1);
+        }
+        const t = d.createElement('template');
+        t.innerHTML = P[i].html;
+        const copy = t.content.firstElementChild;
+        if (!copy) continue;
+        copy.style.cssText += `;margin:0!important;box-shadow:none!important;background:#fff;transform:scale(${THUMB_W / P[i].w});transform-origin:0 0;pointer-events:none`;
         e.target.querySelector('.ga-thumb-img').appendChild(copy);
       }
-    }, { root: aside, rootMargin: '600px 0px' });
-    secs.forEach((sec, i) => {
+    }, { root: aside, rootMargin: '200px 0px' });
+    P.forEach((p, i) => {
       const b = d.createElement('button');
       b.className = 'ga-thumb'; b.dataset.i = String(i); b.type = 'button';
       const img = d.createElement('span');
       img.className = 'ga-thumb-img';
       img.style.width = `${THUMB_W}px`;
-      img.style.height = `${Math.round(THUMB_W * sec.offsetHeight / Math.max(1, sec.offsetWidth))}px`;
+      img.style.height = `${Math.round(THUMB_W * p.h / Math.max(1, p.w))}px`;
       const n = d.createElement('span');
       n.textContent = String(i + 1);
       b.append(img, n);
       b.addEventListener('click', () => goRef.current?.(i + 1));
       aside.appendChild(b);
-      io.observe(b);
+      tio.observe(b);
     });
     d.body.appendChild(aside);
-    return () => io.disconnect();
+    return () => tio.disconnect();
   }, [ready]);   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { docOf()?.body?.classList.toggle('thumbs-open', thumbs && frameW > 700); }, [thumbs, ready, frameW]);   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -796,7 +896,7 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
   const goPage = (n) => {
     const v = Math.max(1, Math.min(pages, Math.floor(Number(n) || 1)));
     setPage(v); setPageText(String(v));
-    docOf()?.querySelectorAll('.docx-wrapper > section.docx')[v - 1]?.scrollIntoView({ block: 'start' });
+    slots.current[v - 1]?.scrollIntoView({ block: 'start' });
   };
   goRef.current = goPage;
   const zoomTo = (z) => { setFit(false); setZoom(Math.max(25, Math.min(400, Math.round(z)))); };
@@ -805,11 +905,88 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
     zoomTo(next);
   };
 
+  // printing needs every page: put them all in for the print, then take them out again
+  const printAll = () => {
+    const d = docOf(), w = frame.current?.contentWindow;
+    if (!d || !w) return;
+    printing.current = true;
+    slots.current.forEach((_, i) => show(i));
+    try { w.print(); } finally {
+      printing.current = false;
+      setTimeout(() => {
+        const h = frame.current?.clientHeight || 900;
+        slots.current.forEach((el, i) => { const r = el.getBoundingClientRect(); if (r.bottom < -1400 || r.top > h + 1400) hide(i); });
+      }, 300);
+    }
+  };
+
+  /* search: every page's text is searched without putting the pages in */
+  const [finding, setFinding] = useState(false);
+  const [term, setTerm] = useState('');
+  const [hits, setHits] = useState({ list: [], cur: -1 });
+  const texts = useRef(null);
+  const marks = useRef([]);
+  const box = useRef(null);
+  const unmark = () => {
+    const touched = new Set();
+    for (const g of marks.current) for (const m of g) {
+      const parent = m.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(m.ownerDocument.createTextNode(m.textContent), m);
+      touched.add(parent);
+    }
+    touched.forEach(x => x.normalize());
+    marks.current = [];
+  };
+  const focusHit = (list, i) => {
+    const h = list[i], d = docOf();
+    if (!h || !d) return;
+    unmark();
+    const el = show(h.p);
+    const needle = term.trim().toLocaleLowerCase('az');
+    marks.current = markIn(d, el, needle);
+    const g = marks.current[Math.min(h.k, marks.current.length - 1)];
+    if (g) { g.forEach(m => m.classList.add('cur')); g[0].scrollIntoView({ block: 'center' }); }
+    else el.scrollIntoView({ block: 'start' });
+  };
+  useEffect(() => {
+    if (!ready) return;
+    const needle = term.trim().toLocaleLowerCase('az');
+    const t = setTimeout(() => {
+      unmark();
+      if (needle.length < 2) { setHits({ list: [], cur: -1 }); return; }
+      if (!texts.current) texts.current = lay.current.pages.map(p => textOfPage(p.html));
+      const list = [];
+      texts.current.forEach((txt, p) => {
+        let k = 0;
+        for (let i = txt.indexOf(needle); i >= 0 && list.length < 5000; i = txt.indexOf(needle, i + needle.length)) list.push({ p, k: k++ });
+      });
+      setHits({ list, cur: list.length ? 0 : -1 });
+      if (list.length) focusHit(list, 0);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [term, ready]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const step = (dir) => {
+    if (!hits.list.length) return;
+    const i = (hits.cur + dir + hits.list.length) % hits.list.length;
+    setHits(h => ({ ...h, cur: i }));
+    focusHit(hits.list, i);
+  };
+  const openFind = () => { setFinding(true); setTimeout(() => box.current?.select(), 0); };
+  const closeFind = () => { setFinding(false); setTerm(''); };
+  useEffect(() => {
+    const key = (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); openFind(); } };
+    window.addEventListener('keydown', key);
+    const d = ready ? docOf() : null;
+    d?.addEventListener('keydown', key);
+    return () => { window.removeEventListener('keydown', key); d?.removeEventListener('keydown', key); };
+  }, [ready]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <>
       <Bar {...bar} after={<>
-        <button className={`vb ${find.finding ? 'on' : ''}`} onClick={find.toggle} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
-        <button className="vb" onClick={() => frame.current?.contentWindow?.print()} title="Çap et"><Printer size={17} /></button>
+        <button className={`vb ${finding ? 'on' : ''}`} onClick={() => (finding ? closeFind() : openFind())} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
+        <button className="vb" onClick={printAll} title="Çap et"><Printer size={17} /></button>
         <Downloads doc={doc} word={saved ? null : () => blob} />
         <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
       </>}>
@@ -836,9 +1013,19 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
         </div>
       </Bar>
       <div className="vbody">
-        {!ready && <div className="viewer-state over"><Loader2 size={22} className="spin" /><strong>Sənəd hazırlanır</strong><span>{doc.name}</span></div>}
+        {!ready && <div className="viewer-state over"><Loader2 size={22} className="spin" /><strong>{busy}</strong><span>{doc.name}</span></div>}
         <iframe ref={frame} className="word-frame docx-frame" title={doc.name} srcDoc={DOCX_FRAME} onLoad={onLoad} style={{ visibility: ready ? 'visible' : 'hidden' }} />
-        {find.panel}
+        {finding && (
+          <div className="vfind">
+            <Search size={15} />
+            <input ref={box} value={term} placeholder="Mətndə axtar" autoFocus onChange={e => setTerm(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') step(e.shiftKey ? -1 : 1); if (e.key === 'Escape') closeFind(); }} />
+            {term.trim().length >= 2 && <span className="vfind-n">{hits.list.length ? `${hits.cur + 1} / ${hits.list.length}` : 'Tapılmadı'}</span>}
+            <button onClick={() => step(-1)} disabled={!hits.list.length} title="Əvvəlki"><ChevronUp size={15} /></button>
+            <button onClick={() => step(1)} disabled={!hits.list.length} title="Növbəti"><ChevronDown size={15} /></button>
+            <button onClick={closeFind} title="Bağla"><X size={15} /></button>
+          </div>
+        )}
       </div>
     </>
   );
