@@ -15,7 +15,9 @@ import { parseDoc } from '../lib/docCache.js';
 import { renderDocx, paginate, addLook, LAYOUT_V, canSaveLayout, snapshot, restore, isComputer } from '../lib/docxLayout.js';
 import { api } from '../lib/api.js';
 import { uploadPieces, cachePut } from '../lib/files.js';
-import { queuePdf, subscribe, retryPdf } from '../lib/pdfQueue.js';
+
+// PDFs made by Microsoft Word (or LibreOffice) on the company server look exactly like the Word file
+export const isExactPdf = (doc) => ['word', 'libreoffice'].includes(doc?.pdf?.engine);
 
 const READER_CSS = `
   mark.ga-hit{background:#fde68a;color:inherit;border-radius:2px;padding:0 1px}
@@ -35,7 +37,9 @@ export default function Reader({ doc, label, fileSlot, actions }) {
   // pdf: a PDF file · saved: a Word file's ready layout (opens at once) · docx: a Word file
   // laid out now (then saved as its ready layout) · pdfcopy: the PDF made from it ·
   // word: plain reading view while a PDF copy is made (old .doc files, unreadable layouts)
-  const first = () => (!word ? 'pdf' : doc.layout?.v === LAYOUT_V && canSaveLayout() ? 'saved' : 'docx');
+  // a Word file with its exact PDF (made by Microsoft Word on the server) opens as that PDF
+  const exact = word && isExactPdf(doc);
+  const first = () => (!word ? 'pdf' : exact ? 'pdfcopy' : doc.layout?.v === LAYOUT_V && canSaveLayout() ? 'saved' : 'docx');
   const [mode, setMode] = useState(first);
   const [blob, setBlob] = useState(null);
   const [err, setErr] = useState('');
@@ -46,7 +50,7 @@ export default function Reader({ doc, label, fileSlot, actions }) {
 
   useEffect(() => { setMode(first()); }, [doc.id]);   // eslint-disable-line react-hooks/exhaustive-deps
   // the PDF copy became ready while the plain view was showing
-  useEffect(() => { if (mode === 'word' && doc.pdf) setMode('pdfcopy'); }, [doc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (exact && mode !== 'pdfcopy') setMode('pdfcopy'); }, [doc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const variant = mode === 'pdfcopy' ? 'pdf' : mode === 'saved' ? 'layout' : undefined;
   useEffect(() => {
@@ -60,8 +64,8 @@ export default function Reader({ doc, label, fileSlot, actions }) {
 
   // the Word layout could not be shown: use the PDF copy, or the plain view and make a copy
   const layoutFailed = useCallback(() => {
-    if (doc.pdf) setMode('pdfcopy');
-    else { setMode('word'); queuePdf(doc); }
+    if (isExactPdf(doc)) setMode('pdfcopy');
+    else setMode('word');
   }, [doc]);
 
   useEffect(() => {
@@ -168,6 +172,7 @@ function PdfView({ blob, doc, fromWord, bar }) {
   const [pdf, setPdf] = useState(null);
   const [lib, setLib] = useState(null);
   const [base, setBase] = useState(null);          // first page size at 100%
+  const [widest, setWidest] = useState(null);      // the widest and tallest page, so no page is cut off
   const [err, setErr] = useState('');
   const [fit, setFit] = useState('width');         // 'width' | 'page' | null (own zoom)
   const [zoom, setZoom] = useState(100);
@@ -179,7 +184,6 @@ function PdfView({ blob, doc, fromWord, bar }) {
   const [finding, setFinding] = useState(false);
   const [term, setTerm] = useState('');
   const [hits, setHits] = useState({ list: [], cur: -1, busy: false });
-  const [gettingWord, setGettingWord] = useState(false);
   const texts = useRef(new Map());
 
   useEffect(() => {
@@ -193,7 +197,14 @@ function PdfView({ blob, doc, fromWord, bar }) {
         const v = p1.getViewport({ scale: 1 });
         if (!alive) return;
         texts.current = new Map();
-        setLib(L); setBase({ w: v.width, h: v.height }); setPdf(d);
+        setLib(L); setBase({ w: v.width, h: v.height }); setPdf(d); setWidest(null);
+        // documents can mix portrait and landscape pages: fit to the widest one
+        let w = v.width, h = v.height;
+        for (let n = 2; n <= d.numPages && alive; n++) {
+          const pv = (await d.getPage(n)).getViewport({ scale: 1 });
+          w = Math.max(w, pv.width); h = Math.max(h, pv.height);
+        }
+        if (alive && (w > v.width + 1 || h > v.height + 1)) setWidest({ w, h });
       } catch (e) { if (alive) setErr(e.message || 'PDF açılmadı'); }
     })();
     return () => { alive = false; task?.destroy?.(); };
@@ -209,7 +220,8 @@ function PdfView({ blob, doc, fromWord, bar }) {
   }, [pdf]);
 
   const turned = rot % 180 !== 0;
-  const pw = base ? (turned ? base.h : base.w) : 1, ph = base ? (turned ? base.w : base.h) : 1;
+  const size = widest || base;
+  const pw = size ? (turned ? size.h : size.w) : 1, ph = size ? (turned ? size.w : size.h) : 1;
   const clamp = (s) => Math.max(0.25, Math.min(4, s));
   const scale = !base ? 1
     : fit === 'width' ? clamp(Math.min(box.w - 48, 940) / pw)
@@ -309,10 +321,6 @@ function PdfView({ blob, doc, fromWord, bar }) {
   };
   const closeSearch = () => { setFinding(false); setTerm(''); };
 
-  const downloadWord = async () => {
-    setGettingWord(true);
-    try { saveBlob(await loadDoc(doc), doc.name); } catch { /* shown by the browser */ } finally { setGettingWord(false); }
-  };
   const pages = pdf?.numPages || 0;
 
   return (
@@ -320,14 +328,15 @@ function PdfView({ blob, doc, fromWord, bar }) {
       <Bar {...bar} after={<>
         <button className={`vb ${finding ? 'on' : ''}`} onClick={() => { setFinding(f => !f); if (finding) setTerm(''); else setTimeout(() => searchBox.current?.focus(), 0); }} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
         <button className="vb wide-only" onClick={() => url && printPdf(url)} title="Çap et"><Printer size={17} /></button>
-        <button className="vb" onClick={() => saveBlob(blob, pdfName)} title="PDF-i endir"><Download size={17} /></button>
+        {fromWord
+          ? <Downloads doc={doc} pdf={() => blob} />
+          : <button className="vb" onClick={() => saveBlob(blob, pdfName)} title="PDF-i endir"><Download size={17} /></button>}
         <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
         <Drop className="vb-more" align="right" title="Daha çox" button={<MoreHorizontal size={17} />}>
           <button className="narrow-only" onClick={rotate}><RotateCw size={15} />Döndər</button>
           <button className="narrow-only" onClick={() => setFit('page')}><FileText size={15} />Səhifəni sığdır</button>
           <button className="narrow-only" onClick={() => url && printPdf(url)}><Printer size={15} />Çap et</button>
           <a href={url || undefined} target="_blank" rel="noopener"><ExternalLink size={15} />Yeni pəncərədə aç</a>
-          {fromWord && <button onClick={downloadWord} disabled={gettingWord}>{gettingWord ? <Loader2 size={15} className="spin" /> : <FileDown size={15} />}Word orijinalını endir</button>}
         </Drop>
       </>}>
         <><button className={`vb ${thumbs ? 'on' : ''}`} onClick={toggleThumbs} title="Səhifələr"><PanelLeft size={17} /></button><span className="vsep" /></>
@@ -362,7 +371,7 @@ function PdfView({ blob, doc, fromWord, bar }) {
           {err ? <div className="viewer-state bad"><AlertTriangle size={22} /><strong>PDF açılmadı</strong><span>{err}</span></div>
             : !pdf || !base ? <div className="viewer-state"><Loader2 size={22} className="spin" /><strong>Səhifələr hazırlanır</strong></div>
               : Array.from({ length: pages }, (_, i) => (
-                <PdfPage key={i + 1} lib={lib} pdf={pdf} n={i + 1} scale={scale} rot={rot} base={{ w: pw, h: ph }} root={scroller}
+                <PdfPage key={i + 1} lib={lib} pdf={pdf} n={i + 1} scale={scale} rot={rot} base={turned ? { w: base.h, h: base.w } : base} root={scroller}
                   term={term.trim().length >= 2 ? lowerAz(term.trim()) : ''} current={hits.list[hits.cur] === i + 1} />
               ))}
         </div>
@@ -512,15 +521,33 @@ function PdfPage({ lib, pdf, n, scale, rot, base, root, term, current }) {
   );
 }
 
-function PdfProgress({ doc }) {
-  const [job, setJob] = useState(null);
-  useEffect(() => subscribe(list => setJob(list.find(j => j.id === doc.id) || null)), [doc.id]);
-  if (!job || job.state === 'done') return null;
+// download for a Word file: the original Word file, and its PDF when there is one
+function Downloads({ doc, word, pdf }) {
+  const [busy, setBusy] = useState('');
+  const base = doc.name.replace(/\.[^.]+$/, '');
+  const get = async (what) => {
+    setBusy(what);
+    try {
+      if (what === 'word') saveBlob(word?.() || await loadDoc(doc), doc.name);
+      else saveBlob(pdf?.() || await loadDoc(doc, null, 'pdf'), `${base}.pdf`);
+    } catch { /* the browser shows the problem */ } finally { setBusy(''); }
+  };
+  const ext = (doc.name.split('.').pop() || 'doc').toUpperCase();
   return (
-    <div className={`pdf-banner ${job.state === 'failed' ? 'bad' : ''}`}>
-      {job.state === 'failed'
-        ? <><AlertTriangle size={14} /><span>PDF yaradılmadı: {job.error}</span><button onClick={() => retryPdf(doc.id)}><RotateCw size={13} />Yenidən</button></>
-        : <><Loader2 size={14} className="spin" /><span>PDF hazırlanır{job.step ? `: ${job.step}` : ''}. Hazır olanda bu sənəd özü PDF kimi açılacaq.</span></>}
+    <Drop className="vb-more" align="right" title="Endir" button={busy ? <Loader2 size={17} className="spin" /> : <Download size={17} />}>
+      <button onClick={() => get('word')}><FileDown size={15} />Orijinal Word faylını endir ({ext})</button>
+      {isExactPdf(doc) && <button onClick={() => get('pdf')}><FileDown size={15} />PDF kimi endir</button>}
+    </Drop>
+  );
+}
+
+// shown on a Word file until the company server has made its exact PDF with Microsoft Word
+function PdfProgress({ doc }) {
+  if (isExactPdf(doc)) return null;
+  return (
+    <div className="pdf-banner">
+      <Loader2 size={14} className="spin" />
+      <span>PDF nüsxəsi serverdə Microsoft Word ilə hazırlanır. Hazır olanda bu sənəd özü PDF kimi açılacaq.</span>
     </div>
   );
 }
@@ -786,24 +813,14 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
     const next = dir > 0 ? ZOOMS.find(z => z > shown + 1) ?? Math.min(400, shown + 50) : [...ZOOMS].reverse().find(z => z < shown - 1) ?? Math.max(25, shown - 25);
     zoomTo(next);
   };
-  const [gettingPdf, setGettingPdf] = useState(false);
-  const downloadPdfCopy = async () => {
-    setGettingPdf(true);
-    try { saveBlob(await loadDoc(doc, null, 'pdf'), `${doc.name.replace(/\.[^.]+$/, '')}.pdf`); } catch { /* shown by the browser */ } finally { setGettingPdf(false); }
-  };
 
   return (
     <>
       <Bar {...bar} after={<>
         <button className={`vb ${find.finding ? 'on' : ''}`} onClick={find.toggle} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
         <button className="vb" onClick={() => frame.current?.contentWindow?.print()} title="Çap et"><Printer size={17} /></button>
-        <button className="vb" onClick={async () => saveBlob(saved ? await loadDoc(doc) : blob, doc.name)} title="Word faylını endir"><Download size={17} /></button>
+        <Downloads doc={doc} word={saved ? null : () => blob} />
         <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
-        {doc.pdf && (
-          <Drop className="vb-more" align="right" title="Daha çox" button={<MoreHorizontal size={17} />}>
-            <button onClick={downloadPdfCopy} disabled={gettingPdf}>{gettingPdf ? <Loader2 size={15} className="spin" /> : <FileDown size={15} />}PDF nüsxəsini endir</button>
-          </Drop>
-        )}
       </>}>
         <><button className={`vb ${thumbs ? 'on' : ''}`} onClick={toggleThumbs} title="Səhifələr"><PanelLeft size={17} /></button><span className="vsep" /></>
         <span className="vsep" />
@@ -827,6 +844,7 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
           <button className={`vb ${fit ? 'on' : ''}`} onClick={() => setFit(true)} title="Enə sığdır"><MoveHorizontal size={17} /></button>
         </div>
       </Bar>
+      <PdfProgress doc={doc} />
       <div className="vbody">
         {!ready && <div className="viewer-state over"><Loader2 size={22} className="spin" /><strong>Sənəd hazırlanır</strong><span>{doc.name}</span></div>}
         <iframe ref={frame} className="word-frame docx-frame" title={doc.name} srcDoc={DOCX_FRAME} onLoad={onLoad} style={{ visibility: ready ? 'visible' : 'hidden' }} />
@@ -903,7 +921,7 @@ function WordView({ blob, doc, bar }) {
       <Bar {...bar} after={<>
         <button className={`vb ${find.finding ? 'on' : ''}`} onClick={find.toggle} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
         <button className="vb" onClick={() => frame.current?.contentWindow?.print()} title="Çap et"><Printer size={17} /></button>
-        <button className="vb" onClick={() => saveBlob(blob, doc.name)} title="Word faylını endir"><Download size={17} /></button>
+        <Downloads doc={doc} word={() => blob} />
         <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
       </>}>
         <></>

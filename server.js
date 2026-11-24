@@ -43,6 +43,10 @@ if (process.env.SITE_URL) {
 <p>Son yenilənmə: <b>${state.lastOk ? new Date(state.lastOk).toLocaleString() : 'hələ yoxdur'}</b></p>
 <p>Dərslər: ${state.lessons} · Fayllar: ${state.files}</p>
 ${state.lastError ? `<p style="color:#dc2626">Xəta: ${state.lastError}</p>` : ''}
+<h3>Word → PDF</h3>
+<p>Proqram: <b>${state.pdf.detail}</b>${state.pdf.engine ? '' : ' (Word faylları PDF-ə çevrilmir: Microsoft Word və ya LibreOffice qurun)'}</p>
+<p>Hazırlanan PDF: ${state.pdf.made} · Gözləyən: ${state.pdf.waiting}</p>
+${state.pdf.lastError ? `<p style="color:#b45309">Son xəta: ${state.pdf.lastError}</p>` : ''}
 <script>setTimeout(()=>location.reload(),15000)</script></body>`);
   });
 } else {

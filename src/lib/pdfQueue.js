@@ -5,7 +5,7 @@
 // reader switches to the PDF on its own.
 import { api } from './api.js';
 import { loadDoc, uploadPieces, cachePut } from './files.js';
-import { wordToPdf, isWordName } from './toPdf.js';
+import { isWordName } from './toPdf.js';
 import { canLayout, canSaveLayout, makeLayout, isComputer, LAYOUT_V } from './docxLayout.js';
 
 const jobs = [];             // { doc, file, state: 'waiting'|'working'|'done'|'failed', step, error }
@@ -21,7 +21,7 @@ export const jobOf = (docId) => jobs.find(j => j.doc.id === docId) || null;
 
 // doc: the stored document; file: the Word file itself if it is on hand
 export function queuePdf(doc, file) {
-  if (!doc?.id || doc.pdf || doc.layout?.v === LAYOUT_V || !isWordName(doc.name) || tried.has(doc.id)) return;
+  if (!doc?.id || ['word', 'libreoffice'].includes(doc.pdf?.engine) || doc.layout?.v === LAYOUT_V || !isWordName(doc.name) || tried.has(doc.id)) return;
   tried.add(doc.id);
   jobs.push({ doc, file: file || null, state: 'waiting', step: '' });
   emit();
@@ -68,14 +68,10 @@ async function run() {
           }
           continue;
         }
-        const pdf = await wordToPdf(file, set, job.doc.id);
-        set('PDF saxlanılır');
-        const name = `${job.doc.name.replace(/\.[^.]+$/, '')}.pdf`;
-        const up = await uploadPieces(pdf, name, p => set(`PDF saxlanılır ${Math.round(p * 100)}%`));
-        await api.attachPdf(job.doc.id, up);
-        cachePut(`${job.doc.id}:pdf:${up.uploadId}`, pdf).catch(() => {});
-        job.state = 'done'; job.step = ''; emit();
-        window.dispatchEvent(new CustomEvent('ga:changed'));
+        // old .doc files and others: their PDF is made by Microsoft Word on the company
+        // server, never here (a browser cannot keep the look of a Word file)
+        jobs.splice(jobs.indexOf(job), 1); emit();
+        continue;
       } catch (e) {
         job.state = 'failed'; job.error = e.message; emit();
       }

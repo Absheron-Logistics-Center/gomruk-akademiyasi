@@ -12,6 +12,13 @@
 // Something deleted on the site disappears from here on the next round (every minute).
 import fs from 'fs/promises';
 import path from 'path';
+import { converter, convertAll } from './convert.js';
+
+// Word files on the site get a PDF copy made here by Microsoft Word (or LibreOffice),
+// so the site can show them exactly as they look in Word
+const WORD_EXT = /^(doc|docx|docm|dot|dotx|dotm|rtf|odt|ott)$/i;
+const EXACT = new Set(['word', 'libreoffice']);
+const PER_ROUND = 15;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const clean = (s, max = 110) => String(s || '')
@@ -21,10 +28,12 @@ const exists = (p) => fs.stat(p).then(s => s, () => null);
 
 export function startMirror({ site, password, dataDir, every = 60 }) {
   const base = site.replace(/\/+$/, '');
-  const state = { lastOk: null, lastError: null, files: 0, lessons: 0, running: false };
+  const state = { lastOk: null, lastError: null, files: 0, lessons: 0, running: false,
+    pdf: { engine: null, detail: 'yoxlanılır', made: 0, waiting: 0, lastError: null } };
+  const failedAt = new Map();      // doc id -> when converting it last failed
   let token = null;
 
-  async function call(p, { raw = false } = {}) {
+  async function call(p, { raw = false, method = 'GET', json, body } = {}) {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (!token) {
         const r = await fetch(`${base}/api/login`, {
@@ -35,7 +44,10 @@ export function startMirror({ site, password, dataDir, every = 60 }) {
         if (!r.ok) throw new Error(`Sayta daxil olmaq olmadı: ${d.error || r.status}`);
         token = d.token;
       }
-      const r = await fetch(`${base}${p}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(60000) });
+      const headers = { Authorization: `Bearer ${token}` };
+      if (json !== undefined) headers['Content-Type'] = 'application/json';
+      if (body !== undefined) headers['Content-Type'] = 'application/octet-stream';
+      const r = await fetch(`${base}${p}`, { method, headers, body: json !== undefined ? JSON.stringify(json) : body, signal: AbortSignal.timeout(120000) });
       if (r.status === 401) { token = null; continue; }
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
@@ -148,7 +160,60 @@ export function startMirror({ site, password, dataDir, every = 60 }) {
     await writeIfChanged(path.join(dataDir, 'catalog.json'), JSON.stringify(cat, null, 1));
     state.files = keepCache.size;
     state.lessons = cat.lessons.length;
+    await makePdfs(cat, cache);
     return downloaded;
+  }
+
+  // send a file to the site in 3 MB pieces, like the browser does
+  async function upload(buf, name) {
+    const start = await call('/api/gomruk/uploads', { method: 'POST', json: { name, size: buf.length } });
+    const size = start.partSize || 3 * 1024 * 1024;
+    for (let n = 0; n < start.parts; n++) {
+      await call(`/api/gomruk/uploads/${start.uploadId}/${n}`, { method: 'PUT', body: buf.subarray(n * size, (n + 1) * size) });
+    }
+    return { uploadId: start.uploadId, parts: start.parts, size: buf.length };
+  }
+
+  // Word documents without an exact PDF copy: make it with Word and put it on the site
+  async function makePdfs(cat, cache) {
+    const work = path.join(dataDir, '.convert');
+    const c = await converter(work);
+    state.pdf.engine = c.engine; state.pdf.detail = c.detail;
+    const docs = [];
+    for (const l of cat.lessons) docs.push(...(l.originals || []), ...(l.explanation ? [l.explanation] : []));
+    const todo = docs.filter(d => WORD_EXT.test(d.ext || '') && !EXACT.has(d.pdf?.engine));
+    const now = Date.now();
+    const ready = todo.filter(d => !(failedAt.get(d.id) > now - 6 * 3600 * 1000));
+    state.pdf.waiting = todo.length;
+    if (!c.engine || !ready.length) return;
+    const batch = ready.slice(0, PER_ROUND);
+    await fs.mkdir(work, { recursive: true });
+    const items = [];
+    for (const d of batch) {
+      const src = path.join(work, `${d.id}.${d.ext}`);     // a plain name: Word and LibreOffice open it without trouble
+      await fs.copyFile(path.join(cache, `${d.id}.${d.ext}`), src).catch(() => {});
+      items.push({ id: d.id, src, out: path.join(work, `${d.id}.pdf`), doc: d });
+    }
+    const results = await convertAll(items, work);
+    for (const it of items) {
+      const r = results.get(it.id);
+      try {
+        if (!r?.ok) throw new Error(r?.error || 'PDF yaranmadı');
+        const buf = await fs.readFile(it.out);
+        if (buf.subarray(0, 5).toString('latin1') !== '%PDF-') throw new Error('PDF yaranmadı');
+        const up = await upload(buf, `${it.doc.name.replace(/\.[^.]+$/, '')}.pdf`);
+        await call(`/api/gomruk/files/${encodeURIComponent(it.id)}/pdf`, { method: 'POST', json: { ...up, engine: c.engine } });
+        state.pdf.made++; state.pdf.waiting--;
+        failedAt.delete(it.id);
+        console.log(`[pdf] ${it.doc.name}`);
+      } catch (e) {
+        failedAt.set(it.id, Date.now());
+        state.pdf.lastError = `${it.doc.name}: ${e.message}`;
+        console.error(`[pdf] ${state.pdf.lastError}`);
+      } finally {
+        await fs.rm(it.src, { force: true }); await fs.rm(it.out, { force: true });
+      }
+    }
   }
 
   (async () => {

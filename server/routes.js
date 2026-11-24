@@ -337,6 +337,8 @@ async function attachCopy(req, res, kind) {
   for (let i = 0; i < parts; i++) await deleteJson(`up/${id}/${i}`).catch(() => {});
   const copy = { key: id, parts, size: total, ...(urls.length === parts ? { urls } : {}), madeAt: new Date().toISOString() };
   if (kind === 'layout') copy.v = String(req.body?.v || '').slice(0, 20);
+  // made by Microsoft Word (or LibreOffice) on the company server: looks exactly like the Word file
+  if (kind === 'pdf' && ['word', 'libreoffice'].includes(req.body?.engine)) copy.engine = req.body.engine;
   let old = null, found = false;
   await updateCatalog(c => {
     old = null; found = false;
