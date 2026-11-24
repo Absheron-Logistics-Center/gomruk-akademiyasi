@@ -54,7 +54,7 @@ export async function uploadFile(file, target, onProgress) {
 const inflight = new Map();
 // variant 'pdf': the PDF copy made from a Word document
 export function loadDoc(doc, onProgress, variant) {
-  const key = variant ? `${doc.id}:${variant}` : doc.id;
+  const key = variant ? `${doc.id}:${variant}:${doc[variant]?.key || ''}` : doc.id;
   if (inflight.has(key)) return inflight.get(key);
   const p = (async () => {
     const cached = await cacheGet(key).catch(() => null);

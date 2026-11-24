@@ -6,7 +6,7 @@
 import { api } from './api.js';
 import { loadDoc, uploadPieces, cachePut } from './files.js';
 import { wordToPdf, isWordName } from './toPdf.js';
-import { canLayout } from './docxLayout.js';
+import { canLayout, canSaveLayout, makeLayout, isComputer, LAYOUT_V } from './docxLayout.js';
 
 const jobs = [];             // { doc, file, state: 'waiting'|'working'|'done'|'failed', step, error }
 const listeners = new Set();
@@ -21,7 +21,7 @@ export const jobOf = (docId) => jobs.find(j => j.doc.id === docId) || null;
 
 // doc: the stored document; file: the Word file itself if it is on hand
 export function queuePdf(doc, file) {
-  if (!doc?.id || doc.pdf || !isWordName(doc.name) || tried.has(doc.id)) return;
+  if (!doc?.id || doc.pdf || doc.layout?.v === LAYOUT_V || !isWordName(doc.name) || tried.has(doc.id)) return;
   tried.add(doc.id);
   jobs.push({ doc, file: file || null, state: 'waiting', step: '' });
   emit();
@@ -50,9 +50,22 @@ async function run() {
           const blob = await loadDoc(job.doc);
           file = new File([blob], job.doc.name);
         }
-        // a Word file that opens in its own layout needs no PDF copy
+        // a Word file that opens in its own layout needs no PDF copy: its pages are laid
+        // out once here and saved, so it opens at once for everyone
         if (await canLayout(file)) {
-          jobs.splice(jobs.indexOf(job), 1); emit();
+          if (canSaveLayout() && isComputer() && job.doc.layout?.v !== LAYOUT_V) {
+            set('Səhifələr hazırlanır');
+            await new Promise(r => setTimeout(r, 30));
+            const gz = await makeLayout(file);
+            set('Saxlanılır');
+            const up = await uploadPieces(gz, `${job.doc.name.replace(/\.[^.]+$/, '')}.html.gz`);
+            await api.attachLayout(job.doc.id, { ...up, v: LAYOUT_V });
+            cachePut(`${job.doc.id}:layout:${up.uploadId}`, gz).catch(() => {});
+            job.state = 'done'; job.step = ''; emit();
+            window.dispatchEvent(new CustomEvent('ga:changed'));
+          } else {
+            jobs.splice(jobs.indexOf(job), 1); emit();
+          }
           continue;
         }
         const pdf = await wordToPdf(file, set, job.doc.id);
@@ -60,7 +73,7 @@ async function run() {
         const name = `${job.doc.name.replace(/\.[^.]+$/, '')}.pdf`;
         const up = await uploadPieces(pdf, name, p => set(`PDF saxlanılır ${Math.round(p * 100)}%`));
         await api.attachPdf(job.doc.id, up);
-        cachePut(`${job.doc.id}:pdf`, pdf).catch(() => {});
+        cachePut(`${job.doc.id}:pdf:${up.uploadId}`, pdf).catch(() => {});
         job.state = 'done'; job.step = ''; emit();
         window.dispatchEvent(new CustomEvent('ga:changed'));
       } catch (e) {

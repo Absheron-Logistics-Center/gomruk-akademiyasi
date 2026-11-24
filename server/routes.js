@@ -69,6 +69,7 @@ async function dropDoc(doc) {
   if (!doc?.id) return;
   await deletePieces(doc.key || doc.id, piecesOf(doc), doc.urls).catch(() => {});
   if (doc.pdf?.key) await deletePieces(doc.pdf.key, doc.pdf.parts, doc.pdf.urls).catch(() => {});
+  if (doc.layout?.key) await deletePieces(doc.layout.key, doc.layout.parts, doc.layout.urls).catch(() => {});
 }
 
 /* ------------------------------ read ------------------------------ */
@@ -234,7 +235,8 @@ router.post('/uploads', wrap(async (req, res) => {
   const name = String(req.body?.name || '').slice(0, 250);
   const size = Number(req.body?.size) || 0;
   const ext = extOf(name);
-  if (!DOC_EXT.has(ext)) throw err(400, `Bu fayl növü qəbul edilmir: .${ext}`);
+  // .gz: a ready page layout of a Word file (it can only be attached as a layout, never as a document)
+  if (!DOC_EXT.has(ext) && ext !== 'gz') throw err(400, `Bu fayl növü qəbul edilmir: .${ext}`);
   if (size <= 0 || size > MAX_FILE) throw err(400, 'Faylın həcmi 95 MB-dan böyük ola bilməz.');
   res.json({ uploadId: uid('u'), partSize: PART, parts: Math.ceil(size / PART) });
 }));
@@ -319,15 +321,22 @@ router.post('/uploads/:id/finish', wrap(async (req, res) => {
 // file; this attaches it to the Word document. The site then shows the PDF,
 // the Word original stays for download.
 //   body: { uploadId, parts, size }
-router.post('/files/:docId/pdf', wrap(async (req, res) => {
+router.post('/files/:docId/pdf', wrap((req, res) => attachCopy(req, res, 'pdf')));
+// layout: the Word file already laid out into pages (as the browser draws it),
+// saved once so that every later opening shows it at once
+//   body: { uploadId, parts, size, v }
+router.post('/files/:docId/layout', wrap((req, res) => attachCopy(req, res, 'layout')));
+
+async function attachCopy(req, res, kind) {
   const docId = req.params.docId;
   const id = String(req.body?.uploadId || '');
   if (!/^u[a-z0-9]+$/i.test(id)) throw err(400, 'Yanlış yükləmə.');
   const parts = Math.max(1, Math.min(40, Number(req.body?.parts) || 1));
   const { total, head, urls } = await collectUpload(id, parts, req.body?.size);
-  if (!head.startsWith('%PDF-')) { await deletePieces(id, parts, urls); throw err(400, 'PDF düzgün yaranmadı.'); }
+  if (kind === 'pdf' && !head.startsWith('%PDF-')) { await deletePieces(id, parts, urls); throw err(400, 'PDF düzgün yaranmadı.'); }
   for (let i = 0; i < parts; i++) await deleteJson(`up/${id}/${i}`).catch(() => {});
-  const pdf = { key: id, parts, size: total, ...(urls.length === parts ? { urls } : {}), madeAt: new Date().toISOString() };
+  const copy = { key: id, parts, size: total, ...(urls.length === parts ? { urls } : {}), madeAt: new Date().toISOString() };
+  if (kind === 'layout') copy.v = String(req.body?.v || '').slice(0, 20);
   let old = null, found = false;
   await updateCatalog(c => {
     old = null; found = false;
@@ -335,15 +344,15 @@ router.post('/files/:docId/pdf', wrap(async (req, res) => {
       for (const d of docsOf(o)) {
         if (d.id !== docId) continue;
         found = true;
-        old = d.pdf || null;
-        d.pdf = pdf;
+        old = d[kind] || null;
+        d[kind] = copy;
       }
     }
   });
   if (!found) { await deletePieces(id, parts, urls); throw err(404, 'Sənəd tapılmadı.'); }
   if (old?.key && old.key !== id) await deletePieces(old.key, old.parts, old.urls).catch(() => {});
   res.json({ ok: true, size: total });
-}));
+}
 
 /* ------------------------------ downloads in parts ------------------------------ */
 async function findDoc(docId) {
@@ -355,6 +364,10 @@ async function findDoc(docId) {
 }
 // ?v=pdf: the PDF copy of a Word document
 function variant(d, v) {
+  if (v === 'layout') {
+    if (!d.layout) throw err(404, 'Bu sənədin hazır görünüşü hələ yoxdur.');
+    return { ...d.layout, id: d.id, name: `${String(d.name).replace(/\.[^.]+$/, '')}.html.gz`, ext: 'gz' };
+  }
   if (v !== 'pdf') return d;
   if (!d.pdf) throw err(404, 'Bu sənədin PDF nüsxəsi hələ yoxdur.');
   return { ...d.pdf, id: d.id, name: `${String(d.name).replace(/\.[^.]+$/, '')}.pdf`, ext: 'pdf' };
@@ -364,7 +377,7 @@ router.get('/files/:docId/meta', wrap(async (req, res) => {
   const found = await findDoc(req.params.docId);
   if (!found) throw err(404, 'Sənəd tapılmadı.');
   const d = variant(found, req.query.v);
-  const { urls: _hidden, pdf: _pdf, ...pub } = d;   // storage addresses stay on the server
+  const { urls: _hidden, pdf: _pdf, layout: _layout, ...pub } = d;   // storage addresses stay on the server
   res.json({ ...pub, partSize: PART, mime: MIME[d.ext] || 'application/octet-stream' });
 }));
 

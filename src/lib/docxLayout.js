@@ -8,7 +8,9 @@ export const LAYOUT = {
   className: 'docx',
   inWrapper: true,
   breakPages: true,
-  ignoreLastRenderedPageBreak: false,   // break pages where Word did
+  // every Word section gets its own page with its own size (portrait or landscape);
+  // pages are then cut by height in paginate(), like Word does
+  ignoreLastRenderedPageBreak: true,
   ignoreWidth: false,
   ignoreHeight: false,
   ignoreFonts: false,
@@ -81,62 +83,193 @@ function lastRunLook(xml, at) {
   return all ? all[all.length - 1].replace(/^<w:r\b[^>]*>\s*/, '') : '';
 }
 
-// Word saves where its pages ended only after the file was opened in Word; files made by
-// other programs come as one long page. Cut such pages at the page height, like Word does.
+// Pages are cut at the page height, like Word does. Footnotes go to the bottom of
+// the page where they are referred to (the layout engine puts them all at the end).
+// Everything is measured first and moved afterwards, so a long file is cut quickly.
 export function paginate(d) {
   const wrap = d.querySelector('.docx-wrapper');
   if (!wrap) return 0;
-  let sec = wrap.querySelector(':scope > section.docx');
-  let guard = 0;
-  while (sec && guard++ < 5000) {
+  const noteH = new Map();          // footnote id -> height
+  let nextId = 0;
+
+  // take the footnote lists out; mark each reference and its note with the same id.
+  // A list holds the notes of all references since the previous list.
+  let pending = [];
+  const pool = new Map();
+  for (const sec of wrap.querySelectorAll(':scope > section.docx')) {
+    sec.querySelectorAll(':scope > article sup').forEach(x => pending.push(x));
+    const lists = [...sec.querySelectorAll(':scope > ol')];
+    if (!lists.length) continue;
+    const items = [...lists[0].children].filter(li => li.tagName === 'LI');
+    let k = 1;
+    for (const sup of pending) {
+      if (k > items.length) break;
+      if (sup.textContent.trim() !== String(k)) continue;
+      const id = `n${nextId++}`;
+      sup.dataset.fn = id;
+      items[k - 1].dataset.fn = id;
+      items[k - 1].value = k;
+      const li = items[k - 1], lr = li.getBoundingClientRect();
+      const ps = [...li.children];
+      const parts = ps.map((el, j) => ({ el, h: (j + 1 < ps.length ? ps[j + 1].getBoundingClientRect().top : lr.bottom) - el.getBoundingClientRect().top }));
+      noteH.set(id, lr.height);
+      pool.set(id, { li, k, parts: parts.length ? parts : [{ el: null, h: lr.height }] });
+      k++;
+    }
+    pending = [];
+  }
+  wrap.querySelectorAll(':scope > section.docx > ol').forEach(ol => { if ([...ol.children].some(li => li.dataset.fn)) ol.remove(); });
+  let noteCap = Infinity;            // a long note continues on the next pages, like in Word
+  const notesIn = (el) => {
+    let h = 0;
+    el.querySelectorAll('sup[data-fn]').forEach(x => { h += Math.min(noteCap, noteH.get(x.dataset.fn) || 0); });
+    return h;
+  };
+  const availOf = new Map();
+  const NOTE_GAP = 18;
+
+  for (const sec of [...wrap.querySelectorAll(':scope > section.docx')]) {
     const art = sec.querySelector(':scope > article');
     const cs = d.defaultView.getComputedStyle(sec);
     const pageH = parseFloat(cs.minHeight) || 0;
-    if (art && pageH > 200) {
-      const head = sec.querySelector(':scope > header'), foot = sec.querySelector(':scope > footer');
-      let avail = pageH - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - (head?.offsetHeight || 0) - (foot?.offsetHeight || 0);
-      if (avail < pageH * 0.4) avail = pageH * 0.6;
-      const top = art.getBoundingClientRect().top;
-      const kids = [...art.children];
-      let cut = kids.findIndex(k => k.getBoundingClientRect().bottom - top > avail + 1);
-      if (cut >= 0) {
-        let carry = null;
-        const el = kids[cut];
-        if (el.tagName === 'TABLE') carry = splitTable(d, el, top, avail, cut === 0);
-        if (!carry && cut === 0) cut = 1;           // one block taller than a page: keep it whole
-        const moved = kids.slice(carry ? cut + 1 : cut);
-        if (carry || moved.length) {
-          const next = sec.cloneNode(false);
-          if (head) next.appendChild(head.cloneNode(true));
-          const na = art.cloneNode(false);
-          next.appendChild(na);
-          if (foot) next.appendChild(foot.cloneNode(true));
-          if (carry) na.appendChild(carry);
-          moved.forEach(k => na.appendChild(k));
-          sec.after(next);
+    if (!art || pageH < 200) continue;
+    const head = sec.querySelector(':scope > header'), foot = sec.querySelector(':scope > footer');
+    let avail = pageH - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - (head?.offsetHeight || 0) - (foot?.offsetHeight || 0);
+    if (avail < pageH * 0.4) avail = pageH * 0.6;
+    availOf.set(sec, avail);
+    noteCap = avail * 0.35;
+
+    // read: where every block (and every table row) ends
+    const top = art.getBoundingClientRect().top;
+    const kids = [...art.children];
+    const box = kids.map(k => { const r = k.getBoundingClientRect(); return { t: r.top - top, b: r.bottom - top, n: notesIn(k) }; });
+    if (!box.length || box[box.length - 1].b <= avail) continue;
+    const rowsOf = new Map();
+    kids.forEach((k, i) => {
+      if (k.tagName !== 'TABLE' || box[i].b - box[i].t < 40) return;
+      const body = k.tBodies[0] || k;
+      const rows = [...body.children].filter(r => r.tagName === 'TR');
+      rowsOf.set(k, { body, rows, box: rows.map(r => { const q = r.getBoundingClientRect(); return { t: q.top - top, b: q.bottom - top, n: notesIn(r) }; }) });
+    });
+
+    // plan: which blocks (or row ranges of a table) go on which page
+    const pages = [[]];
+    let start = box[0].t, notes = 0;
+    const over = (bottom, extra) => bottom - start + (notes + extra ? notes + extra + NOTE_GAP : 0) > avail + 1;
+    const newPage = (y) => { pages.push([]); start = y; notes = 0; };
+    kids.forEach((k, i) => {
+      const cur = pages[pages.length - 1];
+      if (!over(box[i].b, box[i].n)) { cur.push({ el: k }); notes += box[i].n; return; }
+      const t = rowsOf.get(k);
+      if (t && t.rows.length > 1) {
+        // a table across the page end: its rows continue on the next page
+        let from = 0;
+        for (let r = 0; r < t.rows.length; r++) {
+          if (!over(t.box[r].b, t.box[r].n)) { notes += t.box[r].n; continue; }
+          if (r > from) pages[pages.length - 1].push({ el: k, rows: [from, r] });
+          else if (pages[pages.length - 1].length === 0) { notes += t.box[r].n; continue; }   // one row taller than a page
+          newPage(t.box[r].t);
+          from = r;
+          notes += t.box[r].n;
         }
+        pages[pages.length - 1].push({ el: k, rows: [from, t.rows.length] });
+        return;
       }
-    }
-    sec = sec.nextElementSibling?.matches('section.docx') ? sec.nextElementSibling : null;
+      if (cur.length) newPage(box[i].t);
+      pages[pages.length - 1].push({ el: k });
+      notes += box[i].n;
+    });
+    if (pages.length < 2) continue;
+
+    // write: build the pages after this one
+    let after = sec;
+    pages.forEach((items, p) => {
+      let target = art;
+      if (p > 0) {
+        const page = sec.cloneNode(false);
+        if (head) page.appendChild(head.cloneNode(true));
+        target = art.cloneNode(false);
+        page.appendChild(target);
+        if (foot) page.appendChild(foot.cloneNode(true));
+        after.after(page);
+        after = page;
+        availOf.set(page, avail);
+      }
+      for (const it of items) {
+        if (!it.rows) { if (p > 0) target.appendChild(it.el); continue; }
+        const t = rowsOf.get(it.el);
+        if (it.rows[0] === 0) { if (p > 0) target.appendChild(it.el); continue; }   // the first piece keeps the table itself
+        const copy = it.el.cloneNode(false);
+        for (const c of it.el.children) if (c.tagName === 'COLGROUP' || c.tagName === 'THEAD') copy.appendChild(c.cloneNode(true));
+        const nb = t.body === it.el ? copy : copy.appendChild(t.body.cloneNode(false));
+        t.rows.slice(it.rows[0], it.rows[1]).forEach(r => nb.appendChild(r));
+        target.appendChild(copy);
+      }
+    });
   }
+
+  // footnotes: each page takes the notes of its own references at its bottom; a note
+  // that does not fit continues at the bottom of the next page (and the next...)
+  const pagesNow = [...wrap.querySelectorAll(':scope > section.docx')];
+  const used = pagesNow.map(pg => pg.querySelector(':scope > article')?.getBoundingClientRect().height || 0);   // one read
+  let carry = [];                  // [{ note, from }] parts still to place
+  const plan = pagesNow.map((pg, i) => {
+    const own = [...pg.querySelectorAll(':scope > article sup[data-fn]')].map(r => pool.get(r.dataset.fn)).filter(Boolean);
+    const queue = [...carry, ...own.map(note => ({ note, from: 0 }))];
+    carry = [];
+    const avail = availOf.get(pg);
+    if (!queue.length || !avail) { carry = queue; return []; }
+    let room = avail - used[i] - NOTE_GAP;
+    const out = [];
+    for (let q = 0; q < queue.length; q++) {
+      const { note, from } = queue[q];
+      let to = from;
+      while (to < note.parts.length && (room - note.parts[to].h >= 0 || (to === from && !out.length && room > avail * 0.15))) { room -= note.parts[to].h; to++; }
+      if (to > from) out.push({ note, from, to });
+      if (to < note.parts.length) { carry = [{ note, from: to }, ...queue.slice(q + 1)]; break; }
+    }
+    return out;
+  });
+  // notes left over at the end: pages with notes only
+  let last = pagesNow[pagesNow.length - 1];
+  while (carry.length && last) {
+    const page = last.cloneNode(false);
+    const head = last.querySelector(':scope > header'), foot = last.querySelector(':scope > footer');
+    if (head) page.appendChild(head.cloneNode(true));
+    page.appendChild(d.createElement('article'));
+    if (foot) page.appendChild(foot.cloneNode(true));
+    last.after(page);
+    const avail = availOf.get(last) || 900;
+    let room = avail - NOTE_GAP;
+    const out = [];
+    const queue = carry; carry = [];
+    for (let q = 0; q < queue.length; q++) {
+      const { note, from } = queue[q];
+      let to = from;
+      while (to < note.parts.length && (room - note.parts[to].h >= 0 || to === from)) { room -= note.parts[to].h; to++; }
+      out.push({ note, from, to });
+      if (to < note.parts.length) { carry = [{ note, from: to }, ...queue.slice(q + 1)]; break; }
+    }
+    pagesNow.push(page); plan.push(out); availOf.set(page, avail);
+    last = page;
+  }
+  pagesNow.forEach((pg, i) => {
+    if (!plan[i]?.length) return;
+    const ol = d.createElement('ol');
+    ol.className = 'ga-notes';
+    for (const { note, from, to } of plan[i]) {
+      let li;
+      if (from === 0) { li = note.li; }
+      else { li = d.createElement('li'); li.className = 'ga-cont'; }
+      if (note.parts[0].el) for (let j = from; j < to; j++) li.appendChild(note.parts[j].el);
+      ol.appendChild(li);
+    }
+    pg.insertBefore(ol, pg.querySelector(':scope > footer') || null);
+  });
+
   const all = wrap.querySelectorAll(':scope > section.docx');
   numberPages(all);
   return all.length;
-}
-
-// rows past the end of the page go into a copy of the table on the next page
-function splitTable(d, tbl, top, avail, first) {
-  const body = tbl.tBodies[0] || tbl;
-  const rows = [...body.children].filter(r => r.tagName === 'TR');
-  let at = rows.findIndex(r => r.getBoundingClientRect().bottom - top > avail + 1);
-  if (at < 0) return null;
-  if (at === 0) { if (!first) return null; at = 1; }   // the whole table moves, unless it already starts the page
-  if (at >= rows.length) return null;
-  const copy = tbl.cloneNode(false);
-  for (const c of tbl.children) if (c.tagName === 'COLGROUP' || c.tagName === 'THEAD') copy.appendChild(c.cloneNode(true));
-  const nb = (body === tbl ? copy : copy.appendChild(body.cloneNode(false)));
-  rows.slice(at).forEach(r => nb.appendChild(r));
-  return copy;
 }
 
 // page number fields in headers and footers show their own page
@@ -151,4 +284,102 @@ function numberPages(sections) {
       }
     });
   });
+}
+
+// the look of the pages inside the viewer frame (also saved with a ready layout)
+const FRAME_CSS = `
+  mark.ga-hit{background:#fde68a;color:inherit;border-radius:2px;padding:0 1px}
+  mark.ga-hit.cur{background:#f59e0b;color:#fff;box-shadow:0 0 0 2px rgba(245,158,11,.35)}
+  ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#b9c9d2;border-radius:10px;border:3px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background-color:#94abb8}::-webkit-scrollbar-button{display:none;width:0;height:0}
+`;
+export const DOCX_LOOK = `
+  html,body{margin:0;background:#e9eef1}
+  .docx-wrapper>section.docx{display:flex;flex-direction:column}
+  .docx-wrapper>section.docx>article{flex:none}
+  .docx-wrapper>section.docx>footer{margin-top:auto}
+  .docx-wrapper>section.docx>ol.ga-notes{margin:auto 0 0;padding:8px 0 0 1.6em;position:relative}
+  .docx-wrapper>section.docx>ol.ga-notes::before{content:'';position:absolute;left:0;top:0;width:33%;border-top:1px solid #000}
+  .docx-wrapper>section.docx>ol.ga-notes+footer{margin-top:0}
+  .docx-wrapper>section.docx>ol.ga-notes>li.ga-cont{list-style:none}
+  .ga-thumbs{position:fixed;left:0;top:0;bottom:0;width:150px;box-sizing:border-box;overflow-y:auto;background:#f6f8fa;border-right:1px solid #dbe4e9;padding:16px 0 24px;display:none;flex-direction:column;align-items:center;gap:14px;z-index:5}
+  body.thumbs-open{padding-left:150px}
+  body.thumbs-open .ga-thumbs{display:flex}
+  .ga-thumb{display:flex;flex-direction:column;align-items:center;gap:6px;border:0;background:none;cursor:pointer;padding:0;font:500 11.5px Inter,system-ui,sans-serif;color:#8a9ba8;flex-shrink:0}
+  .ga-thumb-img{display:block;position:relative;overflow:hidden;background:#fff;border:1px solid #dbe4e9;outline:2.5px solid transparent;outline-offset:2px;transition:outline-color .12s}
+  .ga-thumb:hover .ga-thumb-img{outline-color:#9fc2d3}
+  .ga-thumb.on .ga-thumb-img{outline-color:#3a7894}
+  .ga-thumb.on{color:#2c5d75;font-weight:650}
+  .docx-wrapper{background:transparent!important;padding:24px 24px 40px!important;display:flex;flex-flow:column;align-items:safe center;width:max-content;min-width:100%;box-sizing:border-box;transform-origin:0 0}
+  .docx-wrapper>section.docx{box-shadow:0 1px 3px rgba(20,60,80,.1),0 10px 30px rgba(20,60,80,.08)!important;margin:0 0 16px!important;flex-shrink:0}
+  ${FRAME_CSS}
+  @page{margin:0}
+  @media print{
+    html,body{background:#fff!important}
+    .docx-wrapper{padding:0!important;zoom:1!important;background:none!important;display:block!important;width:auto!important}
+    .docx-wrapper>section.docx{box-shadow:none!important;margin:0!important;break-after:page}
+    .ga-thumbs{display:none!important}body{padding-left:0!important}
+    mark.ga-hit{background:none!important;color:inherit!important;box-shadow:none!important}
+  }
+`;
+
+/* ---------- ready layouts: laid out once, opened at once ever after ---------- */
+// change this when the way pages are laid out changes, so old saved layouts are made again
+export const LAYOUT_V = 'L2';
+export const canSaveLayout = () => typeof CompressionStream === 'function' && typeof DecompressionStream === 'function';
+
+// the laid-out pages of the frame, packed small
+export async function snapshot(d) {
+  // the viewer's own look is not saved: the current one is added when the pages are opened
+  const look = d.getElementById('ga-look');
+  look?.remove();
+  const json = JSON.stringify({ v: LAYOUT_V, head: d.head.innerHTML, body: d.body.innerHTML });
+  if (look) d.head.appendChild(look);
+  const gz = new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'));
+  return new Response(gz).blob();
+}
+
+// put saved pages into the frame; false when the copy cannot be used
+export async function restore(d, blob) {
+  try {
+    const text = await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).text();
+    const saved = JSON.parse(text);
+    if (saved.v !== LAYOUT_V || !saved.body) return false;
+    d.head.innerHTML = saved.head;
+    addLook(d);
+    d.body.innerHTML = saved.body;
+    return !!d.querySelector('.docx-wrapper > section.docx');
+  } catch { return false; }
+}
+
+// lay a Word file out in a hidden frame (right after it is uploaded) and pack the pages
+export async function makeLayout(blob) {
+  const f = document.createElement('iframe');
+  f.setAttribute('aria-hidden', 'true');
+  f.style.cssText = 'position:fixed;left:-20000px;top:0;width:1200px;height:900px;border:0;visibility:hidden;pointer-events:none';
+  f.srcdoc = '<!doctype html><html><head><meta charset="utf-8"></head><body></body></html>';
+  const loaded = new Promise(r => { f.onload = r; });
+  document.body.appendChild(f);
+  try {
+    await loaded;
+    const d = f.contentDocument;
+    await renderDocx(blob, d.body, d.head);
+    addLook(d);
+    if (!d.querySelector('.docx-wrapper > section.docx') || !(d.body.textContent || '').trim()) throw new Error('Sənəddə mətn yoxdur');
+    paginate(d);
+    return await snapshot(d);
+  } finally {
+    f.remove();
+  }
+}
+// layouts are saved only from a computer: its fonts are the ones Word uses
+export const isComputer = () => !!window.matchMedia?.('(pointer: fine)').matches && window.innerWidth >= 900;
+
+export function addLook(d) {
+  if (d.getElementById('ga-look')) return;
+  const st = d.createElement('style');
+  st.id = 'ga-look';
+  st.textContent = DOCX_LOOK;
+  d.head.appendChild(st);
 }

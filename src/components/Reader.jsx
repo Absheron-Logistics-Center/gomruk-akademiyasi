@@ -12,7 +12,9 @@ import Drop from './Drop.jsx';
 import '../styles/pdf-text.css';
 import { loadDoc, saveBlob, isPdf, fmtSize } from '../lib/files.js';
 import { parseDoc } from '../lib/docCache.js';
-import { renderDocx, paginate } from '../lib/docxLayout.js';
+import { renderDocx, paginate, addLook, LAYOUT_V, canSaveLayout, snapshot, restore, isComputer } from '../lib/docxLayout.js';
+import { api } from '../lib/api.js';
+import { uploadPieces, cachePut } from '../lib/files.js';
 import { queuePdf, subscribe, retryPdf } from '../lib/pdfQueue.js';
 
 const READER_CSS = `
@@ -30,9 +32,11 @@ const writePref = (k, v) => { try { localStorage.setItem(k, v ? '1' : '0'); } ca
 // fileSlot: the file name or file picker; actions: replace / delete / add buttons
 export default function Reader({ doc, label, fileSlot, actions }) {
   const word = !isPdf(doc.name);
-  // pdf: a PDF file · docx: a Word file in its own layout · pdfcopy: the PDF made from it ·
+  // pdf: a PDF file · saved: a Word file's ready layout (opens at once) · docx: a Word file
+  // laid out now (then saved as its ready layout) · pdfcopy: the PDF made from it ·
   // word: plain reading view while a PDF copy is made (old .doc files, unreadable layouts)
-  const [mode, setMode] = useState(word ? 'docx' : 'pdf');
+  const first = () => (!word ? 'pdf' : doc.layout?.v === LAYOUT_V && canSaveLayout() ? 'saved' : 'docx');
+  const [mode, setMode] = useState(first);
   const [blob, setBlob] = useState(null);
   const [err, setErr] = useState('');
   const [progress, setProgress] = useState(0);
@@ -40,11 +44,11 @@ export default function Reader({ doc, label, fileSlot, actions }) {
   const [full, setFull] = useState(false);
   const panel = useRef(null);
 
-  useEffect(() => { setMode(word ? 'docx' : 'pdf'); }, [doc.id]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setMode(first()); }, [doc.id]);   // eslint-disable-line react-hooks/exhaustive-deps
   // the PDF copy became ready while the plain view was showing
   useEffect(() => { if (mode === 'word' && doc.pdf) setMode('pdfcopy'); }, [doc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const variant = mode === 'pdfcopy' ? 'pdf' : undefined;
+  const variant = mode === 'pdfcopy' ? 'pdf' : mode === 'saved' ? 'layout' : undefined;
   useEffect(() => {
     let alive = true;
     setBlob(null); setErr(''); setProgress(0);
@@ -90,14 +94,15 @@ export default function Reader({ doc, label, fileSlot, actions }) {
           <div className="viewer-state">
             <Loader2 size={22} className="spin" />
             <strong>{label} yüklənir</strong>
-            <span>{doc.name} · {fmtSize(variant ? doc.pdf.size : doc.size)}</span>
+            <span>{doc.name} · {fmtSize(variant ? doc[variant].size : doc.size)}</span>
             <div className="viewer-progress"><Progress value={progress} /></div>
           </div>
         </>
       ) : mode === 'pdf' || mode === 'pdfcopy' ? (
         <PdfView blob={blob} doc={doc} fromWord={mode === 'pdfcopy'} bar={bar} />
-      ) : mode === 'docx' ? (
-        <DocxView key={doc.id} blob={blob} doc={doc} bar={bar} onFail={layoutFailed} />
+      ) : mode === 'docx' || mode === 'saved' ? (
+        <DocxView key={`${doc.id}:${mode}`} blob={blob} saved={mode === 'saved'} doc={doc} bar={bar}
+          onFail={mode === 'saved' ? () => setMode('docx') : layoutFailed} />
       ) : (
         <WordView blob={blob} doc={doc} bar={bar} />
       )}
@@ -635,35 +640,26 @@ function useFrameFind(docOf, ready) {
 }
 
 /* ------------------------------ Word, in its own layout ------------------------------ */
+// The first opening lays the pages out and saves them, so every later opening (by anyone)
+// is instant. Only a computer saves it: its fonts are the ones Word uses.
+const saving = new Set();
+async function saveLayout(d, doc) {
+  if (!canSaveLayout() || saving.has(doc.id) || doc.layout?.v === LAYOUT_V || !isComputer()) return;
+  saving.add(doc.id);
+  try {
+    const gz = await snapshot(d);
+    const up = await uploadPieces(gz, `${doc.name.replace(/\.[^.]+$/, '')}.html.gz`);
+    await api.attachLayout(doc.id, { ...up, v: LAYOUT_V });
+    cachePut(`${doc.id}:layout:${up.uploadId}`, gz).catch(() => {});
+    window.dispatchEvent(new CustomEvent('ga:changed'));
+  } catch { saving.delete(doc.id); }
+}
+
 const THUMBS_W = 150;
 const DOCX_FRAME = '<!doctype html><html><head><meta charset="utf-8"></head><body></body></html>';
-const DOCX_LOOK = `
-  html,body{margin:0;background:#e9eef1}
-  .docx-wrapper>section.docx{display:flex;flex-direction:column}
-  .docx-wrapper>section.docx>article{flex:none}
-  .docx-wrapper>section.docx>footer{margin-top:auto}
-  .ga-thumbs{position:fixed;left:0;top:0;bottom:0;width:${THUMBS_W}px;box-sizing:border-box;overflow-y:auto;background:#f6f8fa;border-right:1px solid #dbe4e9;padding:16px 0 24px;display:none;flex-direction:column;align-items:center;gap:14px;z-index:5}
-  body.thumbs-open{padding-left:${THUMBS_W}px}
-  body.thumbs-open .ga-thumbs{display:flex}
-  .ga-thumb{display:flex;flex-direction:column;align-items:center;gap:6px;border:0;background:none;cursor:pointer;padding:0;font:500 11.5px Inter,system-ui,sans-serif;color:#8a9ba8;flex-shrink:0}
-  .ga-thumb-img{display:block;position:relative;overflow:hidden;background:#fff;border:1px solid #dbe4e9;outline:2.5px solid transparent;outline-offset:2px;transition:outline-color .12s}
-  .ga-thumb:hover .ga-thumb-img{outline-color:#9fc2d3}
-  .ga-thumb.on .ga-thumb-img{outline-color:#3a7894}
-  .ga-thumb.on{color:#2c5d75;font-weight:650}
-  .docx-wrapper{background:transparent!important;padding:24px 24px 40px!important;display:flex;flex-flow:column;align-items:center;width:max-content;min-width:100%;box-sizing:border-box;transform-origin:0 0}
-  .docx-wrapper>section.docx{box-shadow:0 1px 3px rgba(20,60,80,.1),0 10px 30px rgba(20,60,80,.08)!important;margin:0 0 16px!important;flex-shrink:0}
-  ${READER_CSS}
-  @page{margin:0}
-  @media print{
-    html,body{background:#fff!important}
-    .docx-wrapper{padding:0!important;zoom:1!important;background:none!important;display:block!important;width:auto!important}
-    .docx-wrapper>section.docx{box-shadow:none!important;margin:0!important;break-after:page}
-    .ga-thumbs{display:none!important}body{padding-left:0!important}
-    mark.ga-hit{background:none!important;color:inherit!important;box-shadow:none!important}
-  }
-`;
 
-function DocxView({ blob, doc, bar, onFail }) {
+
+function DocxView({ blob, saved, doc, bar, onFail }) {
   const frame = useRef(null);
   const [ready, setReady] = useState(false);
   const [pageW, setPageW] = useState(0);
@@ -683,15 +679,21 @@ function DocxView({ blob, doc, bar, onFail }) {
     if (!d || d.body.dataset.done) return;
     d.body.dataset.done = '1';
     try {
-      await renderDocx(blob, d.body, d.head);
-      // the page look goes last, after the document's own styles
-      const st = d.createElement('style');
-      st.textContent = DOCX_LOOK;
-      d.head.appendChild(st);
-      const all = d.querySelectorAll('.docx-wrapper > section.docx');
-      if (!all.length || !(d.body.textContent || '').trim()) throw new Error('boş');
-      setPages(paginate(d) || all.length);
-      setPageW(all[0].getBoundingClientRect().width);
+      if (saved) {
+        // the ready layout: the pages exactly as they were laid out the first time
+        if (!await restore(d, blob)) throw new Error('köhnə');
+        setPages(d.querySelectorAll('.docx-wrapper > section.docx').length);
+      } else {
+        await renderDocx(blob, d.body, d.head);
+        // the page look goes last, after the document's own styles
+        addLook(d);
+        const all = d.querySelectorAll('.docx-wrapper > section.docx');
+        if (!all.length || !(d.body.textContent || '').trim()) throw new Error('boş');
+        setPages(paginate(d) || all.length);
+        saveLayout(d, doc);
+      }
+      // fit to the widest page, so landscape pages are never cut off
+      setPageW(Math.max(...[...d.querySelectorAll('.docx-wrapper > section.docx')].map(x => x.getBoundingClientRect().width)));
       d.addEventListener('scroll', track, { passive: true });
       setReady(true);
     } catch {
@@ -795,7 +797,7 @@ function DocxView({ blob, doc, bar, onFail }) {
       <Bar {...bar} after={<>
         <button className={`vb ${find.finding ? 'on' : ''}`} onClick={find.toggle} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
         <button className="vb" onClick={() => frame.current?.contentWindow?.print()} title="Çap et"><Printer size={17} /></button>
-        <button className="vb" onClick={() => saveBlob(blob, doc.name)} title="Word faylını endir"><Download size={17} /></button>
+        <button className="vb" onClick={async () => saveBlob(saved ? await loadDoc(doc) : blob, doc.name)} title="Word faylını endir"><Download size={17} /></button>
         <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
         {doc.pdf && (
           <Drop className="vb-more" align="right" title="Daha çox" button={<MoreHorizontal size={17} />}>

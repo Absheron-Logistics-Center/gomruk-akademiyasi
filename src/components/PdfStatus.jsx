@@ -1,4 +1,5 @@
-// PdfStatus.jsx — a small note at the bottom left while Word files become PDFs.
+// PdfStatus.jsx — a small note at the bottom left while uploaded Word files are prepared
+// (laid out into pages once, or turned into PDFs when they are old .doc files).
 import { useEffect, useState } from 'react';
 import { Loader2, CheckCircle2, AlertTriangle, RotateCw, X } from 'lucide-react';
 import { subscribe, retryPdf } from '../lib/pdfQueue.js';
@@ -16,7 +17,7 @@ export default function PdfStatus() {
     <div className="pdf-status" role="status">
       <div className="pdf-status-head">
         {busy.length ? <Loader2 size={15} className="spin" /> : failed.length ? <AlertTriangle size={15} className="bad" /> : <CheckCircle2 size={15} className="good" />}
-        <strong>{busy.length ? `Word → PDF: ${done + 1} / ${done + busy.length + failed.length}` : failed.length ? 'Bəzi PDF-lər alınmadı' : 'PDF-lər hazırdır'}</strong>
+        <strong>{busy.length ? `Word sənədləri hazırlanır: ${done + 1} / ${done + busy.length + failed.length}` : failed.length ? 'Bəzi sənədlər hazırlanmadı' : 'Sənədlər hazırdır'}</strong>
         {!busy.length && <button onClick={() => setHidden(true)} aria-label="Bağla"><X size={14} /></button>}
       </div>
       {now && <div className="pdf-status-line"><span>{now.name}</span><em>{now.step}</em></div>}
