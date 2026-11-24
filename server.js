@@ -33,7 +33,7 @@ const site = express();
 
 if (process.env.SITE_URL) {
   const { startMirror } = await import('./server/mirror.js');
-  const state = startMirror({ site: process.env.SITE_URL, password: process.env.APP_PASSWORD || '', dataDir, every: Number(process.env.SYNC_SECONDS) || 60 });
+  const state = startMirror({ site: process.env.SITE_URL, password: process.env.APP_PASSWORD || '', dataDir, every: Number(process.env.SYNC_SECONDS) || 30 });
   site.get('/', (_req, res) => {
     res.type('html').send(`<!doctype html><meta charset="utf-8"><title>Gömrük Akademiyası server</title>
 <body style="font:15px system-ui;padding:32px;color:#243f4f">

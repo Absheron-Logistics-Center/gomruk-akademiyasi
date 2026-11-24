@@ -357,7 +357,7 @@ async function attachCopy(req, res, kind) {
 }
 
 /* ------------------------------ downloads in parts ------------------------------ */
-async function findDoc(docId) {
+export async function findDoc(docId) {
   const c = await readCatalog();
   for (const o of [...c.lessons, ...c.exams]) {
     for (const d of docsOf(o)) if (d.id === docId) return d;
@@ -395,5 +395,22 @@ router.get('/files/:docId', wrap(async (req, res) => {
   res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');   // a doc id never changes content
   res.end(buf);
 }));
+
+// the whole file in one piece (small files only: a function can answer with at most 4.5 MB)
+export const OPEN_MAX = 4.4 * 1024 * 1024;
+export async function readWhole(d) {
+  const bufs = [];
+  for (let i = 0; i < piecesOf(d); i++) {
+    const b = await getPiece(d.key || d.id, i, d.urls?.[i]);
+    if (!b) throw err(404, 'Sənədin faylı tapılmadı.');
+    bufs.push(b);
+  }
+  return Buffer.concat(bufs);
+}
+export async function firstBytes(d) {
+  const b = await getPiece(d.key || d.id, 0, d.urls?.[0]);
+  return b ? b.subarray(0, 8) : Buffer.alloc(0);
+}
+export { MIME };
 
 export default router;

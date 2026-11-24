@@ -23,12 +23,15 @@ $w = New-Object -ComObject Word.Application
 try {
   $w.Visible = $false
   $w.DisplayAlerts = 0
+  try { $w.ScreenUpdating = $false } catch {}
+  try { $w.AutomationSecurity = 3 } catch {}
   try { $w.Options.UpdateLinksAtOpen = $false } catch {}
   foreach ($it in $items) {
     try {
-      $d = $w.Documents.Open([string]$it.src, $false, $true, $false)
+      $d = $w.Documents.Open([string]$it.src)
       $d.ExportAsFixedFormat([string]$it.out, 17)
-      $d.Close(0)
+      $d.Saved = $true
+      $d.Close()
       $res += @{ id = $it.id; ok = $true }
     } catch {
       $res += @{ id = $it.id; ok = $false; error = $_.Exception.Message }

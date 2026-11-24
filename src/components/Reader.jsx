@@ -28,6 +28,7 @@ const READER_CSS = `
   ::-webkit-scrollbar-thumb:hover{background-color:#94abb8}::-webkit-scrollbar-button{display:none;width:0;height:0}
 `;
 const ZOOMS = [50, 75, 100, 125, 150, 200, 300];
+const OFFICE_MAX = 4.4 * 1024 * 1024;
 const readPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === '1'; } catch { return d; } };
 const writePref = (k, v) => { try { localStorage.setItem(k, v ? '1' : '0'); } catch { /* private mode */ } };
 
@@ -39,7 +40,9 @@ export default function Reader({ doc, label, fileSlot, actions }) {
   // word: plain reading view while a PDF copy is made (old .doc files, unreadable layouts)
   // a Word file with its exact PDF (made by Microsoft Word on the server) opens as that PDF
   const exact = word && isExactPdf(doc);
-  const first = () => (!word ? 'pdf' : exact ? 'pdfcopy' : doc.layout?.v === LAYOUT_V && canSaveLayout() ? 'saved' : 'docx');
+  // office: Microsoft's own Word viewer shows the file exactly as Word does (files up to 4.4 MB)
+  const ownLayout = () => (doc.layout?.v === LAYOUT_V && canSaveLayout() ? 'saved' : 'docx');
+  const first = () => (!word ? 'pdf' : exact ? 'pdfcopy' : (doc.size || 0) <= OFFICE_MAX ? 'office' : ownLayout());
   const [mode, setMode] = useState(first);
   const [blob, setBlob] = useState(null);
   const [err, setErr] = useState('');
@@ -56,11 +59,12 @@ export default function Reader({ doc, label, fileSlot, actions }) {
   useEffect(() => {
     let alive = true;
     setBlob(null); setErr(''); setProgress(0);
+    if (mode === 'office') return () => { alive = false; };   // Microsoft's viewer fetches the file itself
     loadDoc(doc, p => alive && setProgress(p), variant)
       .then(b => { if (alive) setBlob(b); })
       .catch(e => { if (alive) setErr(e.message); });
     return () => { alive = false; };
-  }, [doc.id, variant, attempt]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [doc.id, variant, attempt, mode === 'office']);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // the Word layout could not be shown: use the PDF copy, or the plain view and make a copy
   const layoutFailed = useCallback(() => {
@@ -82,7 +86,9 @@ export default function Reader({ doc, label, fileSlot, actions }) {
 
   return (
     <div className="viewer" ref={panel}>
-      {err ? (
+      {mode === 'office' ? (
+        <OfficeView key={doc.id} doc={doc} bar={bar} onFail={() => setMode(ownLayout())} />
+      ) : err ? (
         <>
           <Bar {...bar} />
           <div className="viewer-state bad">
@@ -653,6 +659,54 @@ function useFrameFind(docOf, ready) {
     </div>
   );
   return { finding, toggle, panel };
+}
+
+/* ------------------------------ Word, in Microsoft's Word viewer ------------------------------ */
+// The file is shown by Office Online, Microsoft's Word on the web: the same fonts, line
+// breaks and pages as in Word, drawn on Microsoft's side (fast and light for the browser).
+function OfficeView({ doc, bar, onFail }) {
+  const [src, setSrc] = useState('');
+  const [err, setErr] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api.share(doc.id)
+      .then(r => { if (alive) setSrc(`${location.origin}${r.path}`); })
+      .catch(e => { if (alive) { if (/böyük/.test(e.message)) onFail(); else setErr(e.message); } });
+    const t = setTimeout(() => alive && setSlow(true), 20000);
+    return () => { alive = false; clearTimeout(t); };
+  }, [doc.id]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const viewer = src ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(src)}` : '';
+  const full = src ? `https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(src)}` : '';
+  return (
+    <>
+      <Bar {...bar} after={<>
+        <Downloads doc={doc} />
+        <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
+        <Drop className="vb-more" align="right" title="Daha çox" button={<MoreHorizontal size={17} />}>
+          <a href={full || undefined} target="_blank" rel="noopener"><ExternalLink size={15} />Word görünüşündə yeni pəncərədə aç</a>
+          <button onClick={onFail}><FileText size={15} />Saytın öz görünüşü</button>
+        </Drop>
+      </>} />
+      <div className="vbody">
+        {err ? (
+          <div className="viewer-state bad"><AlertTriangle size={22} /><strong>Sənəd açılmadı</strong><span>{err}</span>
+            <button className="btn small" onClick={onFail}><FileText size={14} />Saytın öz görünüşündə aç</button></div>
+        ) : (
+          <>
+            {!loaded && (
+              <div className="viewer-state over">
+                <Loader2 size={22} className="spin" /><strong>Sənəd açılır</strong><span>{doc.name}</span>
+                {slow && <button className="btn small" onClick={onFail}><FileText size={14} />Açılmırsa: saytın öz görünüşü</button>}
+              </div>
+            )}
+            {viewer && <iframe className="word-frame office-frame" title={doc.name} src={viewer} onLoad={() => setLoaded(true)} allow="fullscreen" />}
+          </>
+        )}
+      </div>
+    </>
+  );
 }
 
 /* ------------------------------ Word, in its own layout ------------------------------ */

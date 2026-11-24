@@ -5,7 +5,7 @@
 // password is asked too. Everyone who is signed in can add, change and delete.
 import express from 'express';
 import crypto from 'crypto';
-import routes from './routes.js';
+import routes, { findDoc, readWhole, firstBytes, OPEN_MAX, MIME } from './routes.js';
 import fs from 'fs';
 import path from 'path';
 import { dataDir, storageProblem, useRedis, useBlob } from './store.js';
@@ -88,6 +88,42 @@ function requireAuth(req, res, next) {
 }
 
 app.get('/api/me', requireAuth, (req, res) => res.json(req.user));
+
+// Word files are shown by Microsoft's own Word viewer (Office Online), so they look exactly
+// as in Word. The viewer reads the file from a signed link that works for two hours only.
+const OPEN_HOURS = 2;
+const openSig = (id, exp) => sign(`open:${id}:${exp}`);
+app.get('/api/gomruk/files/:docId/share', requireAuth, async (req, res, next) => {
+  try {
+    const d = await findDoc(req.params.docId);
+    if (!d) return res.status(404).json({ error: 'Sənəd tapılmadı.' });
+    if ((d.size || 0) > OPEN_MAX) return res.status(413).json({ error: 'Fayl Word görünüşü üçün böyükdür.' });
+    // many files named .doc are .docx inside: give the viewer the real kind
+    let ext = d.ext;
+    if (ext !== 'pdf') { const h = await firstBytes(d); if (h[0] === 0x50 && h[1] === 0x4b) ext = 'docx'; }
+    const exp = Date.now() + OPEN_HOURS * 3600e3;
+    res.json({ path: `/api/open/${encodeURIComponent(d.id)}/${exp}/${openSig(d.id, exp)}/document.${ext}` });
+  } catch (e) { next(e); }
+});
+app.get('/api/open/:docId/:exp/:sig/:name', async (req, res, next) => {
+  try {
+    const { docId, exp, sig } = req.params;
+    const want = openSig(docId, exp);
+    if (!(Number(exp) > Date.now()) || want.length !== sig.length || !crypto.timingSafeEqual(Buffer.from(want), Buffer.from(sig))) {
+      return res.status(403).json({ error: 'Link köhnədir.' });
+    }
+    const d = await findDoc(docId);
+    if (!d) return res.status(404).json({ error: 'Sənəd tapılmadı.' });
+    if ((d.size || 0) > OPEN_MAX) return res.status(413).json({ error: 'Fayl böyükdür.' });
+    const buf = await readWhole(d);
+    const ext = String(req.params.name).split('.').pop();
+    res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream');
+    res.setHeader('Content-Length', String(buf.length));
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.end(buf);
+  } catch (e) { next(e); }
+});
+
 app.use('/api/gomruk', requireAuth, routes);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Belə sorğu yoxdur.' }));

@@ -853,3 +853,4 @@ input.vpage {
 }
 .tip.up::before { top: auto; bottom: -4px; }
 @media (prefers-reduced-motion: reduce) { .tip { transition: none; transform: none; } }
+.office-frame { background: #fff; }
