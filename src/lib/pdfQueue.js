@@ -6,6 +6,7 @@
 import { api } from './api.js';
 import { loadDoc, uploadPieces, cachePut } from './files.js';
 import { wordToPdf, isWordName } from './toPdf.js';
+import { canLayout } from './docxLayout.js';
 
 const jobs = [];             // { doc, file, state: 'waiting'|'working'|'done'|'failed', step, error }
 const listeners = new Set();
@@ -48,6 +49,11 @@ async function run() {
           set('Word faylı yüklənir');
           const blob = await loadDoc(job.doc);
           file = new File([blob], job.doc.name);
+        }
+        // a Word file that opens in its own layout needs no PDF copy
+        if (await canLayout(file)) {
+          jobs.splice(jobs.indexOf(job), 1); emit();
+          continue;
         }
         const pdf = await wordToPdf(file, set, job.doc.id);
         set('PDF saxlanılır');

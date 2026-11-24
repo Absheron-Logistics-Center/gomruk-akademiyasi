@@ -12,6 +12,7 @@ import Drop from './Drop.jsx';
 import '../styles/pdf-text.css';
 import { loadDoc, saveBlob, isPdf, fmtSize } from '../lib/files.js';
 import { parseDoc } from '../lib/docCache.js';
+import { renderDocx, paginate } from '../lib/docxLayout.js';
 import { queuePdf, subscribe, retryPdf } from '../lib/pdfQueue.js';
 
 const READER_CSS = `
@@ -28,6 +29,10 @@ const writePref = (k, v) => { try { localStorage.setItem(k, v ? '1' : '0'); } ca
 
 // fileSlot: the file name or file picker; actions: replace / delete / add buttons
 export default function Reader({ doc, label, fileSlot, actions }) {
+  const word = !isPdf(doc.name);
+  // pdf: a PDF file · docx: a Word file in its own layout · pdfcopy: the PDF made from it ·
+  // word: plain reading view while a PDF copy is made (old .doc files, unreadable layouts)
+  const [mode, setMode] = useState(word ? 'docx' : 'pdf');
   const [blob, setBlob] = useState(null);
   const [err, setErr] = useState('');
   const [progress, setProgress] = useState(0);
@@ -35,8 +40,11 @@ export default function Reader({ doc, label, fileSlot, actions }) {
   const [full, setFull] = useState(false);
   const panel = useRef(null);
 
-  // a Word file with a PDF copy opens as the PDF
-  const variant = !isPdf(doc.name) && doc.pdf ? 'pdf' : undefined;
+  useEffect(() => { setMode(word ? 'docx' : 'pdf'); }, [doc.id]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // the PDF copy became ready while the plain view was showing
+  useEffect(() => { if (mode === 'word' && doc.pdf) setMode('pdfcopy'); }, [doc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const variant = mode === 'pdfcopy' ? 'pdf' : undefined;
   useEffect(() => {
     let alive = true;
     setBlob(null); setErr(''); setProgress(0);
@@ -44,10 +52,13 @@ export default function Reader({ doc, label, fileSlot, actions }) {
       .then(b => { if (alive) setBlob(b); })
       .catch(e => { if (alive) setErr(e.message); });
     return () => { alive = false; };
-  }, [doc.id, variant, doc.pdf?.key, attempt]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [doc.id, variant, attempt]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  // a Word file without a PDF copy yet: make one in the background
-  useEffect(() => { if (!isPdf(doc.name) && !doc.pdf) queuePdf(doc); }, [doc.id, doc.pdf?.key]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // the Word layout could not be shown: use the PDF copy, or the plain view and make a copy
+  const layoutFailed = useCallback(() => {
+    if (doc.pdf) setMode('pdfcopy');
+    else { setMode('word'); queuePdf(doc); }
+  }, [doc]);
 
   useEffect(() => {
     const on = () => setFull(document.fullscreenElement === panel.current);
@@ -59,7 +70,6 @@ export default function Reader({ doc, label, fileSlot, actions }) {
     else panel.current?.requestFullscreen?.();
   };
 
-  const pdf = isPdf(doc.name) || variant === 'pdf';
   const bar = { fileSlot, actions, full, onFull: toggleFull };
 
   return (
@@ -84,8 +94,10 @@ export default function Reader({ doc, label, fileSlot, actions }) {
             <div className="viewer-progress"><Progress value={progress} /></div>
           </div>
         </>
-      ) : pdf ? (
-        <PdfView blob={blob} doc={doc} fromWord={!!variant} bar={bar} />
+      ) : mode === 'pdf' || mode === 'pdfcopy' ? (
+        <PdfView blob={blob} doc={doc} fromWord={mode === 'pdfcopy'} bar={bar} />
+      ) : mode === 'docx' ? (
+        <DocxView key={doc.id} blob={blob} doc={doc} bar={bar} onFail={layoutFailed} />
       ) : (
         <WordView blob={blob} doc={doc} bar={bar} />
       )}
@@ -508,31 +520,278 @@ function PdfProgress({ doc }) {
   );
 }
 
-/* ------------------------------ Word, until its PDF is ready ------------------------------ */
+/* ------------------------------ search inside a page frame ------------------------------ */
+// Finds the words even when Word split them into several pieces of text,
+// and marks every place where they appear.
+function useFrameFind(docOf, ready) {
+  const [finding, setFinding] = useState(false);
+  const [term, setTerm] = useState('');
+  const [hits, setHits] = useState({ n: 0, cur: -1 });
+  const groups = useRef([]);
+  const box = useRef(null);
+
+  const clear = () => {
+    const touched = new Set();
+    for (const g of groups.current) for (const m of g) {
+      const parent = m.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(m.ownerDocument.createTextNode(m.textContent), m);
+      touched.add(parent);
+    }
+    touched.forEach(p => p.normalize());
+    groups.current = [];
+  };
+  const focus = (i) => {
+    groups.current.forEach(g => g.forEach(m => m.classList.remove('cur')));
+    const g = groups.current[i];
+    if (!g?.length) return;
+    g.forEach(m => m.classList.add('cur'));
+    g[0].scrollIntoView({ block: 'center' });
+  };
+  const run = (q) => {
+    const d = docOf();
+    if (!d?.body) return;
+    clear();
+    const needle = q.trim().toLocaleLowerCase('az');
+    if (needle.length < 2) { setHits({ n: 0, cur: -1 }); return; }
+    const found = [];
+    const blocks = d.body.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, th, .docpage');
+    const seen = new Set();
+    for (const el of blocks) {
+      if (found.length >= 3000) break;
+      if (el.querySelector('p, li, td, th')) continue;            // only the innermost text blocks
+      const walker = d.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      const parts = []; let text = '';
+      while (walker.nextNode()) {
+        const n = walker.currentNode;
+        if (seen.has(n)) continue; seen.add(n);
+        const low = n.nodeValue.toLocaleLowerCase('az');
+        if (low.length !== n.nodeValue.length) continue;
+        parts.push({ n, at: text.length }); text += low;
+      }
+      if (!text) continue;
+      const starts = [];
+      for (let i = text.indexOf(needle); i >= 0; i = text.indexOf(needle, i + needle.length)) starts.push(i);
+      const here = [];
+      for (let k = starts.length - 1; k >= 0; k--) {
+        const s0 = starts[k], e0 = s0 + needle.length, group = [];
+        for (let j = parts.length - 1; j >= 0; j--) {
+          const { n, at } = parts[j], end = at + n.nodeValue.length;
+          if (end <= s0 || at >= e0) continue;
+          const s = Math.max(0, s0 - at), e = Math.min(n.nodeValue.length, e0 - at);
+          if (e < n.nodeValue.length) n.splitText(e);
+          const mid = s > 0 ? n.splitText(s) : n;
+          const m = d.createElement('mark');
+          m.className = 'ga-hit';
+          mid.parentNode.replaceChild(m, mid);
+          m.appendChild(mid);
+          group.unshift(m);
+        }
+        if (group.length) here.unshift(group);
+      }
+      found.push(...here);
+    }
+    groups.current = found;
+    setHits({ n: found.length, cur: found.length ? 0 : -1 });
+    if (found.length) focus(0);
+  };
+  useEffect(() => {
+    if (!ready) return;
+    const t = setTimeout(() => run(term), 250);
+    return () => clearTimeout(t);
+  }, [term, ready]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const step = (dir) => {
+    if (!hits.n) return;
+    const i = (hits.cur + dir + hits.n) % hits.n;
+    setHits(h => ({ ...h, cur: i }));
+    focus(i);
+  };
+  const open = () => { setFinding(true); setTimeout(() => box.current?.select(), 0); };
+  const close = () => { setFinding(false); setTerm(''); };
+  const toggle = () => (finding ? close() : open());
+
+  // Ctrl+F opens the search, on the page and inside the document
+  useEffect(() => {
+    const key = (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); open(); } };
+    window.addEventListener('keydown', key);
+    const d = ready ? docOf() : null;
+    d?.addEventListener('keydown', key);
+    return () => { window.removeEventListener('keydown', key); d?.removeEventListener('keydown', key); };
+  }, [ready]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const panel = finding && (
+    <div className="vfind">
+      <Search size={15} />
+      <input ref={box} value={term} placeholder="Mətndə axtar" autoFocus onChange={e => setTerm(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') step(e.shiftKey ? -1 : 1); if (e.key === 'Escape') close(); }} />
+      {term.trim().length >= 2 && <span className="vfind-n">{hits.n ? `${hits.cur + 1} / ${hits.n}` : 'Tapılmadı'}</span>}
+      <button onClick={() => step(-1)} disabled={!hits.n} title="Əvvəlki"><ChevronUp size={15} /></button>
+      <button onClick={() => step(1)} disabled={!hits.n} title="Növbəti"><ChevronDown size={15} /></button>
+      <button onClick={close} title="Bağla"><X size={15} /></button>
+    </div>
+  );
+  return { finding, toggle, panel };
+}
+
+/* ------------------------------ Word, in its own layout ------------------------------ */
+const DOCX_FRAME = '<!doctype html><html><head><meta charset="utf-8"></head><body></body></html>';
+const DOCX_LOOK = `
+  html,body{margin:0;background:#e9eef1}
+  .docx-wrapper>section.docx{display:flex;flex-direction:column}
+  .docx-wrapper>section.docx>article{flex:none}
+  .docx-wrapper>section.docx>footer{margin-top:auto}
+  .docx-wrapper{background:transparent!important;padding:24px 24px 40px!important;display:flex;flex-flow:column;align-items:center;width:max-content;min-width:100%;box-sizing:border-box;transform-origin:0 0}
+  .docx-wrapper>section.docx{box-shadow:0 1px 3px rgba(20,60,80,.1),0 10px 30px rgba(20,60,80,.08)!important;margin:0 0 16px!important;flex-shrink:0}
+  ${READER_CSS}
+  @page{margin:0}
+  @media print{
+    html,body{background:#fff!important}
+    .docx-wrapper{padding:0!important;zoom:1!important;background:none!important;display:block!important;width:auto!important}
+    .docx-wrapper>section.docx{box-shadow:none!important;margin:0!important;break-after:page}
+    mark.ga-hit{background:none!important;color:inherit!important;box-shadow:none!important}
+  }
+`;
+
+function DocxView({ blob, doc, bar, onFail }) {
+  const frame = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [pageW, setPageW] = useState(0);
+  const [frameW, setFrameW] = useState(0);
+  const [fit, setFit] = useState(true);
+  const [zoom, setZoom] = useState(100);
+  const [pages, setPages] = useState(1);
+  const [page, setPage] = useState(1);
+  const [pageText, setPageText] = useState('1');
+  const docOf = () => frame.current?.contentDocument || null;
+  const find = useFrameFind(docOf, ready);
+
+  async function onLoad() {
+    const d = docOf();
+    if (!d || d.body.dataset.done) return;
+    d.body.dataset.done = '1';
+    try {
+      await renderDocx(blob, d.body, d.head);
+      // the page look goes last, after the document's own styles
+      const st = d.createElement('style');
+      st.textContent = DOCX_LOOK;
+      d.head.appendChild(st);
+      const all = d.querySelectorAll('.docx-wrapper > section.docx');
+      if (!all.length || !(d.body.textContent || '').trim()) throw new Error('boş');
+      setPages(paginate(d) || all.length);
+      setPageW(all[0].getBoundingClientRect().width);
+      d.addEventListener('scroll', track, { passive: true });
+      setReady(true);
+    } catch {
+      onFail();
+    }
+  }
+  function track() {
+    const d = docOf();
+    if (!d) return;
+    const limit = (frame.current?.clientHeight || 600) * 0.35;
+    let cur = 1;
+    d.querySelectorAll('.docx-wrapper > section.docx').forEach((s, i) => { if (s.getBoundingClientRect().top < limit) cur = i + 1; });
+    setPage(p => { if (p !== cur) setPageText(String(cur)); return cur; });
+  }
+
+  useEffect(() => {
+    const el = frame.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setFrameW(el.clientWidth));
+    ro.observe(el); setFrameW(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
+
+  const scale = fit && pageW ? Math.max(0.3, Math.min(3, Math.min(940, frameW - 64) / pageW)) : zoom / 100;
+  const shown = Math.round(scale * 100);
+  useEffect(() => {
+    const w = docOf()?.querySelector('.docx-wrapper');
+    if (w) w.style.zoom = String(scale);
+  }, [scale, ready]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const goPage = (n) => {
+    const v = Math.max(1, Math.min(pages, Math.floor(Number(n) || 1)));
+    setPage(v); setPageText(String(v));
+    docOf()?.querySelectorAll('.docx-wrapper > section.docx')[v - 1]?.scrollIntoView({ block: 'start' });
+  };
+  const zoomTo = (z) => { setFit(false); setZoom(Math.max(25, Math.min(400, Math.round(z)))); };
+  const zoomStep = (dir) => {
+    const next = dir > 0 ? ZOOMS.find(z => z > shown + 1) ?? Math.min(400, shown + 50) : [...ZOOMS].reverse().find(z => z < shown - 1) ?? Math.max(25, shown - 25);
+    zoomTo(next);
+  };
+  const [gettingPdf, setGettingPdf] = useState(false);
+  const downloadPdfCopy = async () => {
+    setGettingPdf(true);
+    try { saveBlob(await loadDoc(doc, null, 'pdf'), `${doc.name.replace(/\.[^.]+$/, '')}.pdf`); } catch { /* shown by the browser */ } finally { setGettingPdf(false); }
+  };
+
+  return (
+    <>
+      <Bar {...bar} after={<>
+        <button className={`vb ${find.finding ? 'on' : ''}`} onClick={find.toggle} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
+        <button className="vb" onClick={() => frame.current?.contentWindow?.print()} title="Çap et"><Printer size={17} /></button>
+        <button className="vb" onClick={() => saveBlob(blob, doc.name)} title="Word faylını endir"><Download size={17} /></button>
+        <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
+        {doc.pdf && (
+          <Drop className="vb-more" align="right" title="Daha çox" button={<MoreHorizontal size={17} />}>
+            <button onClick={downloadPdfCopy} disabled={gettingPdf}>{gettingPdf ? <Loader2 size={15} className="spin" /> : <FileDown size={15} />}PDF nüsxəsini endir</button>
+          </Drop>
+        )}
+      </>}>
+        <></>
+        <span className="vsep" />
+        <div className="vgroup">
+          <button className="vb" onClick={() => goPage(page - 1)} disabled={page <= 1} title="Əvvəlki səhifə"><ChevronUp size={17} /></button>
+          <input className="vpage" value={pageText} inputMode="numeric" aria-label="Səhifə"
+            onChange={e => setPageText(e.target.value.replace(/\D/g, ''))}
+            onKeyDown={e => { if (e.key === 'Enter') goPage(pageText); }} onBlur={() => goPage(pageText)} />
+          <span className="vof">/ {ready ? pages : '…'}</span>
+          <button className="vb" onClick={() => goPage(page + 1)} disabled={page >= pages} title="Növbəti səhifə"><ChevronDown size={17} /></button>
+        </div>
+        <span className="vsep" />
+        <div className="vgroup">
+          <button className="vb" onClick={() => zoomStep(-1)} title="Kiçilt"><ZoomOut size={17} /></button>
+          <Drop className="vzoom" title="Ölçü" button={<>{shown}%<ChevronDown size={13} /></>}>
+            <button onClick={() => setFit(true)}>{fit ? <Check size={14} /> : <i />}Enə sığdır</button>
+            <hr />
+            {ZOOMS.map(z => <button key={z} onClick={() => zoomTo(z)}>{!fit && zoom === z ? <Check size={14} /> : <i />}{z}%</button>)}
+          </Drop>
+          <button className="vb" onClick={() => zoomStep(1)} title="Böyüt"><ZoomIn size={17} /></button>
+          <button className={`vb ${fit ? 'on' : ''}`} onClick={() => setFit(true)} title="Enə sığdır"><MoveHorizontal size={17} /></button>
+        </div>
+      </Bar>
+      <div className="vbody">
+        {!ready && <div className="viewer-state over"><Loader2 size={22} className="spin" /><strong>Sənəd hazırlanır</strong><span>{doc.name}</span></div>}
+        <iframe ref={frame} className="word-frame docx-frame" title={doc.name} srcDoc={DOCX_FRAME} onLoad={onLoad} style={{ visibility: ready ? 'visible' : 'hidden' }} />
+        {find.panel}
+      </div>
+    </>
+  );
+}
+
+/* ------------------------------ Word, plain reading view ------------------------------ */
 function WordView({ blob, doc, bar }) {
   const [parsed, setParsed] = useState(null);
   const [err, setErr] = useState('');
   const [zoom, setZoom] = useState(100);
-  const [finding, setFinding] = useState(false);
-  const [term, setTerm] = useState('');
-  const [hits, setHits] = useState({ n: 0, cur: -1 });
   const [pages, setPages] = useState(1);
   const [page, setPage] = useState(1);
+  const [loaded, setLoaded] = useState(false);
   const frame = useRef(null);
-  const marks = useRef([]);
-  const searchBox = useRef(null);
+  const docOf = () => frame.current?.contentDocument || null;
+  const find = useFrameFind(docOf, loaded);
 
   useEffect(() => {
     let alive = true;
-    setParsed(null); setErr('');
+    setParsed(null); setErr(''); setLoaded(false);
     parseDoc(doc.id, blob, doc.name)
       .then(r => { if (alive) setParsed(r); })
       .catch(e => { if (alive) setErr(e.message); });
     return () => { alive = false; };
-  }, [blob, doc.name]);
+  }, [blob, doc.name]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const html = useMemo(() => parsed?.html?.replace(/<script[\s\S]*?<\/script>/gi, '').replace('</head>', `<style>${READER_CSS}</style></head>`) || '', [parsed]);
-  const docOf = () => frame.current?.contentDocument || null;
 
   const applyZoom = useCallback(() => {
     const d = docOf();
@@ -546,90 +805,18 @@ function WordView({ blob, doc, bar }) {
     applyZoom();
     setPages(d.querySelectorAll('div.docpage').length || 1);
     d.addEventListener('scroll', () => {
-      const all = d.querySelectorAll('div.docpage');
       let cur = 1;
-      all.forEach((p, i) => { if (p.getBoundingClientRect().top < 120) cur = i + 1; });
+      d.querySelectorAll('div.docpage').forEach((p, i) => { if (p.getBoundingClientRect().top < 120) cur = i + 1; });
       setPage(cur);
     }, { passive: true });
-    d.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); setFinding(true); setTimeout(() => searchBox.current?.select(), 0); }
-    });
-    if (term) runSearch(term);
+    setLoaded(true);
   };
-  useEffect(() => {
-    const key = (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); setFinding(true); setTimeout(() => searchBox.current?.select(), 0); } };
-    window.addEventListener('keydown', key);
-    return () => window.removeEventListener('keydown', key);
-  }, []);
-
-  function clearMarks() {
-    for (const m of marks.current) {
-      const parent = m.parentNode;
-      if (!parent) continue;
-      parent.replaceChild(m.ownerDocument.createTextNode(m.textContent), m);
-      parent.normalize();
-    }
-    marks.current = [];
-  }
-  function runSearch(q) {
-    const d = docOf();
-    if (!d?.body) return;
-    clearMarks();
-    const needle = q.trim().toLocaleLowerCase('az');
-    if (needle.length < 2) { setHits({ n: 0, cur: -1 }); return; }
-    const walker = d.createTreeWalker(d.body, NodeFilter.SHOW_TEXT);
-    const nodes = [];
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    const found = [];
-    for (const node of nodes) {
-      if (found.length >= 2000) break;
-      const low = node.nodeValue.toLocaleLowerCase('az');
-      if (low.length !== node.nodeValue.length) continue;
-      const at = [];
-      for (let i = low.indexOf(needle); i >= 0; i = low.indexOf(needle, i + needle.length)) at.push(i);
-      if (!at.length) continue;
-      const here = [];
-      for (let k = at.length - 1; k >= 0; k--) {
-        const hit = node.splitText(at[k]);
-        hit.splitText(needle.length);
-        const m = d.createElement('mark');
-        m.className = 'ga-hit';
-        hit.parentNode.replaceChild(m, hit);
-        m.appendChild(hit);
-        here.unshift(m);
-      }
-      found.push(...here);
-    }
-    marks.current = found;
-    setHits({ n: found.length, cur: found.length ? 0 : -1 });
-    if (found.length) focusHit(0, found);
-  }
-  function focusHit(i, list = marks.current) {
-    list.forEach(m => m.classList.remove('cur'));
-    const m = list[i];
-    if (!m) return;
-    m.classList.add('cur');
-    m.scrollIntoView({ block: 'center' });
-  }
-  const step = (dir) => {
-    if (!hits.n) return;
-    const i = (hits.cur + dir + hits.n) % hits.n;
-    setHits(h => ({ ...h, cur: i }));
-    focusHit(i);
-  };
-  useEffect(() => {
-    if (!parsed) return;
-    const t = setTimeout(() => runSearch(term), 250);
-    return () => clearTimeout(t);
-  }, [term, parsed]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const goPage = (n) => {
-    const d = docOf();
     const v = Math.max(1, Math.min(pages, n));
-    d?.getElementById(`page=${v}`)?.scrollIntoView({ block: 'start' });
+    docOf()?.getElementById(`page=${v}`)?.scrollIntoView({ block: 'start' });
     setPage(v);
   };
-  const closeSearch = () => { setFinding(false); setTerm(''); };
 
   if (err) {
     return (
@@ -648,7 +835,7 @@ function WordView({ blob, doc, bar }) {
   return (
     <>
       <Bar {...bar} after={<>
-        <button className={`vb ${finding ? 'on' : ''}`} onClick={() => { setFinding(f => !f); if (finding) setTerm(''); else setTimeout(() => searchBox.current?.focus(), 0); }} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
+        <button className={`vb ${find.finding ? 'on' : ''}`} onClick={find.toggle} title="Mətndə axtar (Ctrl+F)"><Search size={17} /></button>
         <button className="vb" onClick={() => frame.current?.contentWindow?.print()} title="Çap et"><Printer size={17} /></button>
         <button className="vb" onClick={() => saveBlob(blob, doc.name)} title="Word faylını endir"><Download size={17} /></button>
         <button className="vb" onClick={bar.onFull} title={bar.full ? 'Tam ekrandan çıx' : 'Tam ekran'}>{bar.full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
@@ -674,17 +861,7 @@ function WordView({ blob, doc, bar }) {
         {!parsed
           ? <div className="viewer-state"><Loader2 size={22} className="spin" /><strong>Sənəd hazırlanır</strong><span>{doc.name}</span></div>
           : <iframe ref={frame} className="word-frame" title={doc.name} sandbox="allow-same-origin allow-modals" srcDoc={html} onLoad={onLoad} />}
-        {finding && (
-          <div className="vfind">
-            <Search size={15} />
-            <input ref={searchBox} value={term} placeholder="Mətndə axtar" autoFocus onChange={e => setTerm(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') step(e.shiftKey ? -1 : 1); if (e.key === 'Escape') closeSearch(); }} />
-            {term.trim().length >= 2 && <span className="vfind-n">{hits.n ? `${hits.cur + 1} / ${hits.n}` : 'Tapılmadı'}</span>}
-            <button onClick={() => step(-1)} disabled={!hits.n} title="Əvvəlki"><ChevronUp size={15} /></button>
-            <button onClick={() => step(1)} disabled={!hits.n} title="Növbəti"><ChevronDown size={15} /></button>
-            <button onClick={closeSearch} title="Bağla"><X size={15} /></button>
-          </div>
-        )}
+        {find.panel}
       </div>
     </>
   );
