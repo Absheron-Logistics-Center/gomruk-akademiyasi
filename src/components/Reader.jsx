@@ -12,6 +12,7 @@ import Drop from './Drop.jsx';
 import '../styles/pdf-text.css';
 import { loadDoc, saveBlob, isPdf, fmtSize } from '../lib/files.js';
 import { parseDoc } from '../lib/docCache.js';
+import { noteActivity } from '../lib/pdfQueue.js';
 import { renderDocx, paginate, addLook, LAYOUT_V, canSaveLayout, snapshot, restore, isComputer } from '../lib/docxLayout.js';
 import { api } from '../lib/api.js';
 import { uploadPieces, cachePut } from '../lib/files.js';
@@ -541,17 +542,6 @@ function Downloads({ doc, word, pdf }) {
   );
 }
 
-// shown on a Word file until the company server has made its exact PDF with Microsoft Word
-function PdfProgress({ doc }) {
-  if (isExactPdf(doc)) return null;
-  return (
-    <div className="pdf-banner">
-      <Loader2 size={14} className="spin" />
-      <span>PDF nüsxəsi serverdə Microsoft Word ilə hazırlanır. Hazır olanda bu sənəd özü PDF kimi açılacaq.</span>
-    </div>
-  );
-}
-
 /* ------------------------------ search inside a page frame ------------------------------ */
 // Finds the words even when Word split them into several pieces of text,
 // and marks every place where they appear.
@@ -728,6 +718,7 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
     }
   }
   function track() {
+    noteActivity();
     const d = docOf();
     if (!d) return;
     const limit = (frame.current?.clientHeight || 600) * 0.35;
@@ -844,7 +835,6 @@ function DocxView({ blob, saved, doc, bar, onFail }) {
           <button className={`vb ${fit ? 'on' : ''}`} onClick={() => setFit(true)} title="Enə sığdır"><MoveHorizontal size={17} /></button>
         </div>
       </Bar>
-      <PdfProgress doc={doc} />
       <div className="vbody">
         {!ready && <div className="viewer-state over"><Loader2 size={22} className="spin" /><strong>Sənəd hazırlanır</strong><span>{doc.name}</span></div>}
         <iframe ref={frame} className="word-frame docx-frame" title={doc.name} srcDoc={DOCX_FRAME} onLoad={onLoad} style={{ visibility: ready ? 'visible' : 'hidden' }} />
@@ -940,7 +930,6 @@ function WordView({ blob, doc, bar }) {
           <button className="vb" onClick={() => setZoom(z => Math.min(250, z + 10))} title="Böyüt"><ZoomIn size={17} /></button>
         </div>
       </Bar>
-      <PdfProgress doc={doc} />
       <div className="vbody">
         {!parsed
           ? <div className="viewer-state"><Loader2 size={22} className="spin" /><strong>Sənəd hazırlanır</strong><span>{doc.name}</span></div>

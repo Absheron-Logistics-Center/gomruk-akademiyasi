@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, getToken, getUser, clearSession, setOnExpired } from './lib/api.js';
 import Login from './components/Login.jsx';
 import Home from './components/Home.jsx';
@@ -7,6 +7,7 @@ import ExamPage from './components/ExamPage.jsx';
 import { useUi } from './components/ui.jsx';
 import { go } from './lib/nav.js';
 import PdfStatus from './components/PdfStatus.jsx';
+import { prepareInBackground } from './lib/pdfQueue.js';
 
 // #/                     lessons
 // #/ders/<id>/<tab>      a lesson (tab: original | izah | test)
@@ -71,6 +72,15 @@ export default function App() {
     document.addEventListener('visibilitychange', v);
     return () => { clearInterval(t); document.removeEventListener('visibilitychange', v); };
   }, [user, reload]);
+
+  // documents nobody has opened yet are prepared quietly, so they open at once later
+  const prepared = useRef(false);
+  useEffect(() => {
+    if (!catalog || prepared.current) return;
+    prepared.current = true;
+    const t = setTimeout(() => prepareInBackground(catalog), 8000);
+    return () => clearTimeout(t);
+  }, [catalog]);
 
   if (!user) return <Login onLogin={u => { setUser(u); toast(`Xoş gəldiniz, ${u.name}`); }} />;
 

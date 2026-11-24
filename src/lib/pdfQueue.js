@@ -13,8 +13,13 @@ const listeners = new Set();
 const tried = new Set();     // doc ids already handled in this visit
 let running = false;
 
+let lastInput = Date.now();
+export const noteActivity = () => { lastInput = Date.now(); };
+for (const ev of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'scroll']) {
+  window.addEventListener(ev, () => { lastInput = Date.now(); }, { passive: true, capture: true });
+}
 const emit = () => { for (const fn of listeners) fn(snapshot()); };
-export const snapshot = () => jobs.map(j => ({ id: j.doc.id, name: j.doc.name, state: j.state, step: j.step, error: j.error }));
+export const snapshot = () => jobs.filter(j => !j.silent).map(j => ({ id: j.doc.id, name: j.doc.name, state: j.state, step: j.step, error: j.error }));
 export function subscribe(fn) { listeners.add(fn); fn(snapshot()); return () => listeners.delete(fn); }
 export const isQueued = (docId) => jobs.some(j => j.doc.id === docId && (j.state === 'waiting' || j.state === 'working'));
 export const jobOf = (docId) => jobs.find(j => j.doc.id === docId) || null;
@@ -25,6 +30,20 @@ export function queuePdf(doc, file) {
   tried.add(doc.id);
   jobs.push({ doc, file: file || null, state: 'waiting', step: '' });
   emit();
+  run();
+}
+
+// Word files nobody has opened since they were added: lay them out quietly one by one
+// while the site is open on a computer, so every document opens at once later
+export function prepareInBackground(catalog) {
+  if (!catalog || !canSaveLayout() || !isComputer()) return;
+  for (const l of catalog.lessons || []) {
+    for (const doc of [...(l.originals || []), ...(l.explanation ? [l.explanation] : [])]) {
+      if (!doc?.id || ['word', 'libreoffice'].includes(doc.pdf?.engine) || doc.layout?.v === LAYOUT_V || !isWordName(doc.name) || tried.has(doc.id)) continue;
+      tried.add(doc.id);
+      jobs.push({ doc, file: null, state: 'waiting', step: '', silent: true });
+    }
+  }
   run();
 }
 
@@ -39,8 +58,10 @@ async function run() {
   running = true;
   try {
     for (;;) {
-      const job = jobs.find(j => j.state === 'waiting');
+      const job = jobs.find(j => j.state === 'waiting' && !j.silent) || jobs.find(j => j.state === 'waiting');
       if (!job) break;
+      // quiet work waits until nobody is using the page (laying out a long file takes a few seconds)
+      if (job.silent) { while (Date.now() - lastInput < 8000) await new Promise(r => setTimeout(r, 2000)); }
       job.state = 'working'; emit();
       try {
         const set = (step) => { job.step = step; emit(); };
@@ -73,7 +94,8 @@ async function run() {
         jobs.splice(jobs.indexOf(job), 1); emit();
         continue;
       } catch (e) {
-        job.state = 'failed'; job.error = e.message; emit();
+        if (job.silent) { jobs.splice(jobs.indexOf(job), 1); emit(); }
+        else { job.state = 'failed'; job.error = e.message; emit(); }
       }
     }
   } finally {
@@ -88,5 +110,5 @@ async function run() {
 
 // a page is closing while PDFs are still being made: ask before leaving
 window.addEventListener('beforeunload', (e) => {
-  if (jobs.some(j => j.state === 'waiting' || j.state === 'working')) { e.preventDefault(); e.returnValue = ''; }
+  if (jobs.some(j => !j.silent && (j.state === 'waiting' || j.state === 'working'))) { e.preventDefault(); e.returnValue = ''; }
 });
